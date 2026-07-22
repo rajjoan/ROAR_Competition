@@ -40,14 +40,10 @@ class RoarCompetitionSolution:
         self.rpy_sensor = rpy_sensor
         self.occupancy_map_sensor = occupancy_map_sensor
         self.collision_sensor = collision_sensor
-        
-        self.print_counter = 0 
+    
     async def initialize(self) -> None:
         # TODO: You can do some initial computation here if you want to.
         # For example, you can compute the path to the first waypoint.
-
-        # Counter used to control how often debug information is printed
-        self.debug_step = 0
 
         # Receive location, rotation and velocity data 
         vehicle_location = self.location_sensor.get_last_gym_observation()
@@ -61,6 +57,10 @@ class RoarCompetitionSolution:
             self.maneuverable_waypoints
         )
 
+        # Debug dashboard setup: print every N steps instead of every tick
+        self.step_count = 0
+        self.debug_print_interval = 20  # print roughly every 20 world steps
+
 
     async def step(
         self
@@ -72,59 +72,36 @@ class RoarCompetitionSolution:
         """
         # TODO: Implement your solution here.
 
-        # Receive location, rotation and velocity data
+        # Receive location, rotation and velocity data 
         vehicle_location = self.location_sensor.get_last_gym_observation()
         vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
         vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
-
-        # Calculate the vehicle's current speed
         vehicle_velocity_norm = np.linalg.norm(vehicle_velocity)
-
+        
         # Find the waypoint closest to the vehicle
         self.current_waypoint_idx = filter_waypoints(
             vehicle_location,
             self.current_waypoint_idx,
             self.maneuverable_waypoints
         )
+         # We use the 3rd waypoint ahead of the current waypoint as the target waypoint
+        waypoint_to_follow = self.maneuverable_waypoints[(self.current_waypoint_idx + 3) % len(self.maneuverable_waypoints)]
 
-        # Use the 3rd waypoint ahead as the target waypoint
-        waypoint_to_follow = self.maneuverable_waypoints[
-            (self.current_waypoint_idx + 3)
-            % len(self.maneuverable_waypoints)
-        ]
+        # Calculate delta vector towards the target waypoint
+        vector_to_waypoint = (waypoint_to_follow.location - vehicle_location)[:2]
+        heading_to_waypoint = np.arctan2(vector_to_waypoint[1],vector_to_waypoint[0])
 
-        # Calculate the direction toward the target waypoint
-        vector_to_waypoint = (
-            waypoint_to_follow.location - vehicle_location
-        )[:2]
+        # Calculate delta angle towards the target waypoint
+        delta_heading = normalize_rad(heading_to_waypoint - vehicle_rotation[2])
 
-        heading_to_waypoint = np.arctan2(
-            vector_to_waypoint[1],
-            vector_to_waypoint[0]
-        )
-
-        # Calculate the difference between the target heading
-        # and the vehicle's current heading
-        delta_heading = normalize_rad(
-            heading_to_waypoint - vehicle_rotation[2]
-        )
-
-        # Proportional controller for steering
+        # Proportional controller to steer the vehicle towards the target waypoint
         steer_control = (
-            -8.0 / np.sqrt(vehicle_velocity_norm)
-            * delta_heading / np.pi
+            -8.0 / np.sqrt(vehicle_velocity_norm) * delta_heading / np.pi
         ) if vehicle_velocity_norm > 1e-2 else -np.sign(delta_heading)
+        steer_control = np.clip(steer_control, -1.0, 1.0)
 
-        steer_control = np.clip(
-            steer_control,
-            -1.0,
-            1.0
-        )
-
-        # Proportional controller that tries to maintain 20 m/s
-        throttle_control = 0.05 * (
-            20 - vehicle_velocity_norm
-        )
+        # Proportional controller to control the vehicle's speed towards 40 m/s
+        throttle_control = 0.05 * (20 - vehicle_velocity_norm)
 
         control = {
             "throttle": np.clip(throttle_control, 0.0, 1.0),
@@ -134,93 +111,28 @@ class RoarCompetitionSolution:
             "reverse": 0,
             "target_gear": 0
         }
+        # Debug dashboard: print every `debug_print_interval` steps to avoid flooding the console
+        self.step_count += 1
+        if self.step_count % self.debug_print_interval == 0:
+            print("\n" + "=" * 70)
+            print("          AUTONOMOUS CAR DEBUG DASHBOARD")
+            print("=" * 70)
 
-        # Increase the debug counter every simulation step
-        # self.debug_step += 1
+            print(f"1. Current Position      : {vehicle_location}")
+            print(f"2. Closest Waypoint ID   : {self.current_waypoint_idx}")
+            print(f"3. Target Waypoint       : {waypoint_to_follow.location}")
+            print(f"4. Vector to Waypoint    : {vector_to_waypoint}")
 
-        # Print important values every 20 simulation steps
-        # if self.debug_step % 20 == 0:
-        #     print(
-        #         f"DEBUG | "
-        #         f"Waypoint: {self.current_waypoint_idx} | "
-        #         f"Speed: {vehicle_velocity_norm:.2f} m/s | "
-        #         f"Heading error: {delta_heading:.3f} rad | "
-        #         f"Steer: {steer_control:.3f} | "
-        #         f"Throttle: {control['throttle']:.3f} | "
-        #         f"Brake: {control['brake']:.3f}"
-        #     )
+            print(f"5. Current Heading       : {np.degrees(vehicle_rotation[2]):.2f}°")
+            print(f"6. Target Heading        : {np.degrees(heading_to_waypoint):.2f}°")
+            print(f"7. Heading Error         : {np.degrees(delta_heading):.2f}°")
 
-        # Count up our frame pacing variable
-        self.print_counter += 1
-        # Condition: Trigger the console render only once every 20 frames to preserve computer resources
-        if self.print_counter % 20 == 0:
-           print("\n" + "=" * 70)
-           print("          AUTONOMOUS CAR DEBUG DASHBOARD")
-           print("=" * 70)
+            print(f"8. Current Speed         : {vehicle_velocity_norm:.2f} m/s")
+            print(f"9. Steering Output       : {control['steer']:.3f}")
+            print(f"10. Throttle             : {control['throttle']:.3f}")
+            print(f"11. Brake                : {control['brake']:.3f}")
 
-           print(f"1. Current Position      : {vehicle_location}")
-           print(f"2. Closest Waypoint ID   : {self.current_waypoint_idx}")
-           print(f"3. Target Waypoint       : {waypoint_to_follow.location}")
-           print(f"4. Vector to Waypoint    : {vector_to_waypoint}")
-
-           print(f"5. Current Heading       : {np.degrees(vehicle_rotation[2]):.2f}°")
-           print(f"6. Target Heading        : {np.degrees(heading_to_waypoint):.2f}°")
-           print(f"7. Heading Error         : {np.degrees(delta_heading):.2f}°")
-
-           print(f"8. Current Speed         : {vehicle_velocity_norm:.2f} m/s")
-           print(f"9. Steering Output       : {control['steer']:.3f}")
-           print(f"10. Throttle             : {control['throttle']:.3f}")
-           print(f"11. Brake                : {control['brake']:.3f}")
-
-           print("============================================")
-
-           print("=" * 70)
+            print("=" * 70)
 
         await self.vehicle.apply_action(control)
         return control
-        
-
-
-
-        
-        # # Receive location, rotation and velocity data 
-        # vehicle_location = self.location_sensor.get_last_gym_observation()
-        # vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
-        # vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
-        # vehicle_velocity_norm = np.linalg.norm(vehicle_velocity)
-        
-        # # Find the waypoint closest to the vehicle
-        # self.current_waypoint_idx = filter_waypoints(
-        #     vehicle_location,
-        #     self.current_waypoint_idx,
-        #     self.maneuverable_waypoints
-        # )
-        #  # We use the 3rd waypoint ahead of the current waypoint as the target waypoint
-        # waypoint_to_follow = self.maneuverable_waypoints[(self.current_waypoint_idx + 3) % len(self.maneuverable_waypoints)]
-
-        # # Calculate delta vector towards the target waypoint
-        # vector_to_waypoint = (waypoint_to_follow.location - vehicle_location)[:2]
-        # heading_to_waypoint = np.arctan2(vector_to_waypoint[1],vector_to_waypoint[0])
-
-        # # Calculate delta angle towards the target waypoint
-        # delta_heading = normalize_rad(heading_to_waypoint - vehicle_rotation[2])
-
-        # # Proportional controller to steer the vehicle towards the target waypoint
-        # steer_control = (
-        #     -8.0 / np.sqrt(vehicle_velocity_norm) * delta_heading / np.pi
-        # ) if vehicle_velocity_norm > 1e-2 else -np.sign(delta_heading)
-        # steer_control = np.clip(steer_control, -1.0, 1.0)
-
-        # # Proportional controller to control the vehicle's speed towards 40 m/s
-        # throttle_control = 0.05 * (20 - vehicle_velocity_norm)
-
-        # control = {
-        #     "throttle": np.clip(throttle_control, 0.0, 1.0),
-        #     "steer": steer_control,
-        #     "brake": np.clip(-throttle_control, 0.0, 1.0),
-        #     "hand_brake": 0.0,
-        #     "reverse": 0,
-        #     "target_gear": 0
-        # }
-        # await self.vehicle.apply_action(control)
-        # return control
