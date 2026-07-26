@@ -40,7 +40,7 @@ class RoarCompetitionSolution:
         self.rpy_sensor = rpy_sensor
         self.occupancy_map_sensor = occupancy_map_sensor
         self.collision_sensor = collision_sensor
-    
+        self.print_counter = 0
     async def initialize(self) -> None:
         # TODO: You can do some initial computation here if you want to.
         # For example, you can compute the path to the first waypoint.
@@ -85,7 +85,23 @@ class RoarCompetitionSolution:
             self.maneuverable_waypoints
         )
          # We use the 3rd waypoint ahead of the current waypoint as the target waypoint
-        waypoint_to_follow = self.maneuverable_waypoints[(self.current_waypoint_idx + 3) % len(self.maneuverable_waypoints)]
+        # waypoint_to_follow = self.maneuverable_waypoints[(self.current_waypoint_idx + 3) % len(self.maneuverable_waypoints)]
+        # ----------------------------------------------------------
+        # Dynamic Lookahead
+        # ----------------------------------------------------------
+        # Minimum number of waypoints to look ahead
+        base_lookahead = 3
+        # Controls how much the lookahead increases with speed
+        k_v = 0.5
+        # Calculate lookahead based on current speed
+        lookahead_distance = int(base_lookahead + k_v * vehicle_velocity_norm)
+        # Keep it between 3 and 20 waypoints
+        lookahead_distance = np.clip(lookahead_distance, 3, 20)
+        # Select the target waypoint
+        waypoint_to_follow = self.maneuverable_waypoints[
+            (self.current_waypoint_idx + lookahead_distance)
+            % len(self.maneuverable_waypoints)
+        ]
 
         # Calculate delta vector towards the target waypoint
         vector_to_waypoint = (waypoint_to_follow.location - vehicle_location)[:2]
@@ -100,8 +116,36 @@ class RoarCompetitionSolution:
         ) if vehicle_velocity_norm > 1e-2 else -np.sign(delta_heading)
         steer_control = np.clip(steer_control, -1.0, 1.0)
 
-        # Proportional controller to control the vehicle's speed towards 40 m/s
-        throttle_control = 0.05 * (20 - vehicle_velocity_norm)
+# --- Curvature-aware target speed ---
+        # Look further down the track than the steering target to estimate how
+        # sharply the road curves ahead. Straight ahead -> high target speed.
+        # Sharp turn ahead -> low target speed, so we brake before we reach it.
+        lookahead_distance = 15  # waypoints further out than the steering target
+        far_waypoint = self.maneuverable_waypoints[
+            (self.current_waypoint_idx + 3 + lookahead_distance) % len(self.maneuverable_waypoints)
+        ]
+        vector_to_far_waypoint = (far_waypoint.location - waypoint_to_follow.location)[:2]
+        heading_to_far_waypoint = np.arctan2(vector_to_far_waypoint[1], vector_to_far_waypoint[0])
+
+        # How much the road direction changes between the near target and the far target.
+        # ~0 rad = straight, larger = sharper corner ahead.
+        curvature_angle = abs(normalize_rad(heading_to_far_waypoint - heading_to_waypoint))
+
+        # Map curvature angle to a target speed: straight -> max_speed, sharp corner -> min_speed
+        max_speed = 40.0   # m/s target on straights
+        min_speed = 12.0   # m/s target for sharp corners
+        curvature_angle_at_min_speed = 0.6  # radians (~34 degrees) considered "sharp"
+        target_speed = np.interp(
+            curvature_angle,
+            [0.0, curvature_angle_at_min_speed],
+            [max_speed, min_speed]
+        )
+
+        # Proportional controller to control the vehicle's speed towards the dynamic target
+        throttle_control = 0.05 * (target_speed - vehicle_velocity_norm)
+
+
+
 
         control = {
             "throttle": np.clip(throttle_control, 0.0, 1.0),
@@ -112,25 +156,31 @@ class RoarCompetitionSolution:
             "target_gear": 0
         }
         # Debug dashboard: print every `debug_print_interval` steps to avoid flooding the console
-        self.step_count += 1
-        if self.step_count % self.debug_print_interval == 0:
+        self.print_counter += 1
+
+        if self.print_counter % 20 == 0:
+
+            target_waypoint_idx = (
+                self.current_waypoint_idx + lookahead_distance
+            ) % len(self.maneuverable_waypoints)
+
             print("\n" + "=" * 70)
-            print("          AUTONOMOUS CAR DEBUG DASHBOARD")
+            print("           DYNAMIC LOOKAHEAD DEBUG")
             print("=" * 70)
 
-            print(f"1. Current Position      : {vehicle_location}")
-            print(f"2. Closest Waypoint ID   : {self.current_waypoint_idx}")
-            print(f"3. Target Waypoint       : {waypoint_to_follow.location}")
-            print(f"4. Vector to Waypoint    : {vector_to_waypoint}")
+            print(f"Current Speed        : {vehicle_velocity_norm:.2f} m/s")
+            print(f"Current Speed        : {vehicle_velocity_norm*3.6:.2f} km/h")
 
-            print(f"5. Current Heading       : {np.degrees(vehicle_rotation[2]):.2f}°")
-            print(f"6. Target Heading        : {np.degrees(heading_to_waypoint):.2f}°")
-            print(f"7. Heading Error         : {np.degrees(delta_heading):.2f}°")
+            print()
 
-            print(f"8. Current Speed         : {vehicle_velocity_norm:.2f} m/s")
-            print(f"9. Steering Output       : {control['steer']:.3f}")
-            print(f"10. Throttle             : {control['throttle']:.3f}")
-            print(f"11. Brake                : {control['brake']:.3f}")
+            print(f"Current Waypoint     : {self.current_waypoint_idx}")
+            print(f"Lookahead Distance   : {lookahead_distance}")
+            print(f"Target Waypoint      : {target_waypoint_idx}")
+
+            print()
+
+            print(f"Current Steering     : {control['steer']:.3f}")
+            print(f"Throttle             : {control['throttle']:.3f}")
 
             print("=" * 70)
 
