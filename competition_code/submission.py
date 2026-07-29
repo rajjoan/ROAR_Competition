@@ -5,9 +5,9 @@ Please do not change anything else but fill out the to-do sections.
 
 from typing import List, Tuple, Dict, Optional
 import roar_py_interface
-import numpy as np  
+import numpy as np
 
-def normalize_rad(rad : float):
+def normalize_rad(rad : float):  
     return (rad + np.pi) % (2 * np.pi) - np.pi
 
 def filter_waypoints(location : np.ndarray, current_idx: int, waypoints : List[roar_py_interface.RoarPyWaypoint]) -> int:
@@ -21,11 +21,11 @@ def filter_waypoints(location : np.ndarray, current_idx: int, waypoints : List[r
     return current_idx
 
 class RoarCompetitionSolution:
-    def __init__(
+    def __init__( 
         self,
         maneuverable_waypoints: List[roar_py_interface.RoarPyWaypoint],
         vehicle : roar_py_interface.RoarPyActor,
-        camera_sensor : roar_py_interface.RoarPyCameraSensor = None, 
+        camera_sensor : roar_py_interface.RoarPyCameraSensor = None,
         location_sensor : roar_py_interface.RoarPyLocationInWorldSensor = None,
         velocity_sensor : roar_py_interface.RoarPyVelocimeterSensor = None,
         rpy_sensor : roar_py_interface.RoarPyRollPitchYawSensor = None,
@@ -41,7 +41,6 @@ class RoarCompetitionSolution:
         self.occupancy_map_sensor = occupancy_map_sensor
         self.collision_sensor = collision_sensor
         self.print_counter = 0
-        
     
     async def initialize(self) -> None:
         # TODO: You can do some initial computation here if you want to.
@@ -83,9 +82,7 @@ class RoarCompetitionSolution:
             self.maneuverable_waypoints
         )
          # We use the 3rd waypoint ahead of the current waypoint as the target waypoint
-        #waypoint_to_follow = self.maneuverable_waypoints[(self.current_waypoint_idx + 3) % len(self.maneuverable_waypoints)]
-
-        # ----------------------------------------------------------
+        ## ----------------------------------------------------------
         # Dynamic Lookahead
         # ----------------------------------------------------------
         # Minimum number of waypoints to look ahead
@@ -101,6 +98,7 @@ class RoarCompetitionSolution:
             (self.current_waypoint_idx + lookahead_distance)
             % len(self.maneuverable_waypoints)
         ]
+        
 
         # Calculate delta vector towards the target waypoint
         vector_to_waypoint = (waypoint_to_follow.location - vehicle_location)[:2]
@@ -108,35 +106,84 @@ class RoarCompetitionSolution:
 
         # Calculate delta angle towards the target waypoint
         delta_heading = normalize_rad(heading_to_waypoint - vehicle_rotation[2])
+		
+# ----------------------------------------------------------
+# Predictive Intelligent Braking
+# ----------------------------------------------------------
+        prediction_offset = 10
+        prediction_distance = lookahead_distance + prediction_offset
 
+        prediction_waypoint = self.maneuverable_waypoints[
+			(self.current_waypoint_idx + prediction_distance)
+			% len(self.maneuverable_waypoints)]
+			
+			
+        prediction_vector = (
+			prediction_waypoint.location - vehicle_location
+			)[:2]
+
+        prediction_heading = np.arctan2(
+		prediction_vector[1],
+		prediction_vector[0]
+		)
+
+        prediction_delta_heading = normalize_rad(
+		prediction_heading - vehicle_rotation[2]
+		)
+
+        prediction_turn = abs(prediction_delta_heading)
+
+
+# ----------------------------------------------------------
+# Adaptive Target Speed
+# ----------------------------------------------------------
+
+#        turn_amount = abs(delta_heading)
+
+#       if turn_amount < 0.15:
+#           road_type = "Straight"
+#           target_velocity = 30.0
+
+#       elif turn_amount < 0.35:
+#           road_type = "Gentle Turn"
+#           target_velocity = 25.0
+
+#       elif turn_amount < 0.60:
+#           road_type = "Medium Turn"
+#           target_velocity = 20.0
+
+#       else:
+#           road_type = "Sharp Corner"
+#           target_velocity = 15.0
 
         turn_amount = abs(delta_heading)
-        target_velocity = 32 - (25 * turn_amount)
-        target_velocity = np.clip(target_velocity, 20, 32)
+        target_velocity = 46 - (20 * turn_amount)  
 
-        # if turn_amount < 0.15:
-        #     target_velocity = 35.0
-        # elif turn_amount < 0.3:
-        #     target_velocity = 25.0
-        # elif turn_amount < 0.6:
-        #     target_velocity = 20.0
-        # else:
-        #     target_velocity = 15.0
+		# Predictive Braking 
+        if prediction_turn > 0.60:
+            target_velocity = min(target_velocity, 20)
 
-        # Proportional controllerto steer the vehicle towards the target waypoint
+        elif prediction_turn > 0.40:
+            target_velocity = min(target_velocity, 24)
+        target_velocity = np.clip(target_velocity,15,46) 
+		
+
+        # Proportional controller to steer the vehicle towards the target waypoint
         steer_control = (
             -8.0 / np.sqrt(vehicle_velocity_norm) * delta_heading / np.pi
         ) if vehicle_velocity_norm > 1e-2 else -np.sign(delta_heading)
         steer_control = np.clip(steer_control, -1.0, 1.0)
 
+        # Proportional controller to control the vehicle's speed towards 40 m/s
+        #throttle_control = 0.05 * (20 - vehicle_velocity_norm)  
 # ----------------------------------------------------------
 # PD Speed Controller
 # ----------------------------------------------------------
 
 # Desired cruising speed
-  #      target_velocity = 27.0   # 40 m/s ≈ 144 km/h 
+#        target_velocity = 30.0   # 30 m/s ≈ 108 km/h
 
-# P Term: How far are we from the target speed? 
+# P Term: How far are we from the target speed?
         speed_error = target_velocity - vehicle_velocity_norm
 
 # D Term: How much has the speed changed since the last frame?
@@ -144,15 +191,15 @@ class RoarCompetitionSolution:
         speed_acceleration = vehicle_velocity_norm - last_speed
 
 # Save current speed for the next frame
-        self.last_speed = vehicle_velocity_norm
+        self.last_speed = vehicle_velocity_norm 
 
 # Controller gains
         Kp = 0.6
-        Kd = 0.1 
+        Kd = 0.1
 
 # PD Controller
-        throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)  
- 
+        throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
+
         control = {
             "throttle": np.clip(throttle_control, 0.0, 1.0),
             "steer": steer_control,
