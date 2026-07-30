@@ -157,16 +157,16 @@ class RoarCompetitionSolution:
 #           target_velocity = 15.0
 
         turn_amount = abs(delta_heading)
-        target_velocity = 46 - (20 * turn_amount)  
+        target_velocity = 47 - (25 * turn_amount)  
 
 		# Predictive Braking 
-        if prediction_turn > 0.60:
-            target_velocity = min(target_velocity, 20)
-
-        elif prediction_turn > 0.40:
+        if prediction_turn > 0.75:
+            target_velocity = min(target_velocity, 19)
+        elif prediction_turn > 0.55:
             target_velocity = min(target_velocity, 24)
-        target_velocity = np.clip(target_velocity,15,46) 
-		
+        elif prediction_turn > 0.35:
+            target_velocity = min(target_velocity, 30)
+        target_velocity = np.clip(target_velocity,15,50)		
 
         # Proportional controller to steer the vehicle towards the target waypoint
         steer_control = (
@@ -176,6 +176,18 @@ class RoarCompetitionSolution:
 
         # Proportional controller to control the vehicle's speed towards 40 m/s
         #throttle_control = 0.05 * (20 - vehicle_velocity_norm)  
+
+# ----------------------------------------------------------
+# Aggressive Throttle Recovery
+# ----------------------------------------------------------
+
+        recovery_speed = 5
+
+        if turn_amount < 0.12 and prediction_turn < 0.1:
+            target_velocity += recovery_speed
+ 
+        target_velocity = np.clip(target_velocity, 15, 50)
+
 # ----------------------------------------------------------
 # PD Speed Controller
 # ----------------------------------------------------------
@@ -194,7 +206,7 @@ class RoarCompetitionSolution:
         self.last_speed = vehicle_velocity_norm 
 
 # Controller gains
-        Kp = 0.6
+        Kp = 0.7
         Kd = 0.1
 
 # PD Controller
