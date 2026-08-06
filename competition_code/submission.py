@@ -143,20 +143,29 @@ class RoarCompetitionSolution:
         )
         n = len(self.maneuverable_waypoints)
 
-        # Dynamic lookahead + steering: unchanged from the main-branch prototype.
-        # This change is scoped to speed planning; steering is a separate, later upgrade
-        # (e.g. swapping in real pure pursuit, which cuts corners "for free" per the
-        # article -- this proportional controller does not).
-        lookahead_distance = int(np.clip(3 + 0.5 * speed, 3, 20))
+        # Dynamic lookahead. Cap raised from the main-branch prototype's 20 to 35
+        # waypoints, matching the reference solutions' own proven max lookahead count
+        # at top speed -- 20 was tuned against a 50 m/s ceiling, this profile now
+        # allows up to 85 m/s, and too-short a lookahead at high speed is a known
+        # cause of steering oscillation.
+        lookahead_distance = int(np.clip(3 + 0.5 * speed, 3, 35))
         target_point = self.path[(self.current_waypoint_idx + lookahead_distance) % n]
 
         vector_to_target = (target_point - vehicle_location)[:2]
         heading_to_target = np.arctan2(vector_to_target[1], vector_to_target[0])
         delta_heading = normalize_rad(heading_to_target - vehicle_rotation[2])
 
-        steer_control = (
-            -8.0 / np.sqrt(speed) * delta_heading / np.pi
-        ) if speed > 1e-2 else -np.sign(delta_heading)
+        # Pure pursuit steering, replacing the plain proportional heading controller.
+        # This is the actual fix for the wall crashes: MU=2.75 in the velocity profile
+        # was carried over from the reference solutions' pure-pursuit controller, which
+        # naturally cuts toward a wider, gentler arc through a corner than the track's
+        # literal curvature. The old proportional controller tracked the path much more
+        # literally (tighter effective radius, same nominal corner), so v=sqrt(mu*g*r)
+        # was systematically optimistic for it -- the car was being asked to go faster
+        # than it could actually turn. Pure pursuit reunites the controller with the
+        # assumption the speed profile was built on.
+        lookahead_m = max(np.linalg.norm(vector_to_target), 1e-3)
+        steer_control = -1.5 * np.arctan2(2.0 * 4.7 * np.sin(delta_heading) / lookahead_m, 1.0)
         steer_control = np.clip(steer_control, -1.0, 1.0)
 
         # Speed target: a direct lookup into the precomputed profile. Replaces the
