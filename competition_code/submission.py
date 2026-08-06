@@ -73,6 +73,7 @@ class RoarCompetitionSolution:
 
         self.velocity_profile = self._build_velocity_profile(self.path)
         self.last_speed = 0.0
+        self.stuck_ticks = 0
 
     def _build_velocity_profile(self, path: List[np.ndarray]) -> np.ndarray:
         """
@@ -192,6 +193,19 @@ class RoarCompetitionSolution:
 
         Kp, Kd = 0.8, 0.02
         throttle_control = np.clip(Kp * speed_error - Kd * speed_accel, -1.0, 1.0)
+
+        # Stuck detection: confirmed necessary by an actual in-sim crash log where the
+        # car's reported position was identical across 4+ consecutive ticks while
+        # throttle ramped to 1.0 -- it was wedged against a wall, grinding into it with
+        # nothing to recognize that commanding more throttle wasn't producing any speed.
+        # If throttle is meaningfully open but speed isn't rising for several ticks in a
+        # row, override to full brake instead of continuing to push into whatever it hit.
+        if throttle_control > 0.5 and speed_accel <= 0.05:
+            self.stuck_ticks += 1
+        else:
+            self.stuck_ticks = 0
+        if self.stuck_ticks > 5:
+            throttle_control = -1.0
 
         control = {
             "throttle": max(throttle_control, 0.0),
