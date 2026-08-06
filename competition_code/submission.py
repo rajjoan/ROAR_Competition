@@ -189,5 +189,14 @@ class RoarCompetitionSolution:
             "target_gear": 0,
         }
 
+        # TEMP DEBUG: remove once the wall-crash cause is confirmed. Prints one line
+        # per tick so we can see the actual numbers at the moment of a crash instead
+        # of guessing from symptoms.
+        print(
+            f"wp={self.current_waypoint_idx:4d} v={speed:5.1f} tgt_v={target_velocity:5.1f} "
+            f"dh={delta_heading:+.3f} lh_m={lookahead_m:5.1f} steer={steer_control:+.3f} "
+            f"thr={control['throttle']:.2f} brk={control['brake']:.2f}"
+        )
+
         await self.vehicle.apply_action(control)
         return control
