@@ -40,13 +40,10 @@ class RoarCompetitionSolution:
         self.rpy_sensor = rpy_sensor
         self.occupancy_map_sensor = occupancy_map_sensor
         self.collision_sensor = collision_sensor
-        self.print_counter = 0
-    
+        self.frame = 0
     async def initialize(self) -> None:
         # TODO: You can do some initial computation here if you want to.
-        # For example, you can compute the path to the first waypoint.
-
-        # Receive location, rotation and velocity data 
+        # For example, you can compute the path to the first waypoint.        # Receive location, rotation and velocity data 
         vehicle_location = self.location_sensor.get_last_gym_observation()
         vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
         vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
@@ -57,6 +54,21 @@ class RoarCompetitionSolution:
             self.current_waypoint_idx,
             self.maneuverable_waypoints
         )
+
+        # Build a smoothed racing line
+        self.optimized_waypoints=[]
+        n=len(self.maneuverable_waypoints)
+        for i in range(n):
+            p=self.maneuverable_waypoints[(i-1)%n]
+            c=self.maneuverable_waypoints[i]
+            nx=self.maneuverable_waypoints[(i+1)%n]
+            wp=roar_py_interface.RoarPyWaypoint(
+                location=0.2*p.location+0.6*c.location+0.2*nx.location,
+                roll_pitch_yaw=c.roll_pitch_yaw,
+                lane_width=c.lane_width
+            )
+            self.optimized_waypoints.append(wp)
+
 
 
     async def step(
@@ -94,7 +106,7 @@ class RoarCompetitionSolution:
         # Keep it between 3 and 20 waypoints
         lookahead_distance = np.clip(lookahead_distance, 3, 20)
         # Select the target waypoint
-        waypoint_to_follow = self.maneuverable_waypoints[
+        waypoint_to_follow = self.optimized_waypoints[
             (self.current_waypoint_idx + lookahead_distance)
             % len(self.maneuverable_waypoints)
         ]
@@ -110,7 +122,7 @@ class RoarCompetitionSolution:
 # ----------------------------------------------------------
 # Predictive Intelligent Braking
 # ----------------------------------------------------------
-        prediction_offset = 10
+        prediction_offset = 17
         prediction_distance = lookahead_distance + prediction_offset
 
         prediction_waypoint = self.maneuverable_waypoints[
@@ -138,35 +150,20 @@ class RoarCompetitionSolution:
 # Adaptive Target Speed
 # ----------------------------------------------------------
 
-#        turn_amount = abs(delta_heading)
-
-#       if turn_amount < 0.15:
-#           road_type = "Straight"
-#           target_velocity = 30.0
-
-#       elif turn_amount < 0.35:
-#           road_type = "Gentle Turn"
-#           target_velocity = 25.0
-
-#       elif turn_amount < 0.60:
-#           road_type = "Medium Turn"
-#           target_velocity = 20.0
-
-#       else:
-#           road_type = "Sharp Corner"
-#           target_velocity = 15.0
-
         turn_amount = abs(delta_heading)
-        target_velocity = 47 - (23 * turn_amount)  
+        target_velocity = 48 - (21 * turn_amount)   
 
 		# Predictive Braking 
-        if prediction_turn > 0.80: #0.75
-            target_velocity = min(target_velocity, 22) #19
-        elif prediction_turn > 0.55:
-            target_velocity = min(target_velocity, 26)#23
-        elif prediction_turn > 0.30: #0.25
-            target_velocity = min(target_velocity, 39)#30
-        target_velocity = np.clip(target_velocity,15,50)		
+        if prediction_turn > 0.90: #0.75
+            target_velocity = min(target_velocity, 24) #19
+        elif prediction_turn > 0.70:
+            target_velocity = min(target_velocity, 28)#23
+        elif prediction_turn > 0.50:
+            target_velocity = min(target_velocity, 33)#23
+        elif prediction_turn > 0.35: #0.25
+            target_velocity = min(target_velocity, 42)#30
+ 
+        target_velocity = np.clip(target_velocity,15,50)
 
         # Proportional controller to steer the vehicle towards the target waypoint
         steer_control = (
@@ -206,48 +203,21 @@ class RoarCompetitionSolution:
         self.last_speed = vehicle_velocity_norm 
 
 # Controller gains
-        Kp = 0.7
-        Kd = 0.1
+        Kp = 0.8
+        Kd = 0.02
 
 # PD Controller
+        #throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
         throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
-
+        throttle_control = np.clip(throttle_control, -0.45, 1.0)
         control = {
-            "throttle": np.clip(throttle_control, 0.0, 1.0),
-            "steer": steer_control,
-            "brake": np.clip(-throttle_control, 0.0, 1.0),
-            "hand_brake": 0.0,
-            "reverse": 0,
-            "target_gear": 0
-        }
-
-        self.print_counter += 1
-
-        if self.print_counter % 20 == 0:
-
-            target_waypoint_idx = (
-                self.current_waypoint_idx + lookahead_distance
-            ) % len(self.maneuverable_waypoints)
-
-            print("\n" + "=" * 70)
-            print("           DYNAMIC LOOKAHEAD DEBUG")
-            print("=" * 70)
-
-            print(f"Current Speed        : {vehicle_velocity_norm:.2f} m/s")
-            print(f"Current Speed        : {vehicle_velocity_norm*3.6:.2f} km/h")
-
-            print()
-
-            print(f"Current Waypoint     : {self.current_waypoint_idx}")
-            print(f"Lookahead Distance   : {lookahead_distance}")
-            print(f"Target Waypoint      : {target_waypoint_idx}")
-
-            print()
-
-            print(f"Current Steering     : {control['steer']:.3f}")
-            print(f"Throttle             : {control['throttle']:.3f}")
-
-            print("=" * 70)
+                "throttle": max(throttle_control, 0.0),
+                "steer": steer_control,
+                "brake": max(-throttle_control, 0.0),
+                "hand_brake": 0.0,
+                "reverse": 0,
+                "target_gear": 0,
+            }
 
         await self.vehicle.apply_action(control)
         return control
