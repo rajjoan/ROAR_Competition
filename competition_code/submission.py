@@ -113,6 +113,19 @@ class RoarCompetitionSolution:
             for i in range(n)
         ])
 
+        # Sliding-window MIN filter, confirmed necessary by an actual in-sim crash:
+        # the debug log showed tgt_v spike from 26.6 -> 30.5 m/s in a single waypoint
+        # step while delta_heading was still growing (i.e. still mid-corner), and the
+        # resulting full-throttle command is what caused that crash. A single noisy
+        # curvature reading at one point had nothing capping it. Using min (not mean)
+        # means a bad reading can only be suppressed by tighter real neighbors, never
+        # averaged into something falsely faster.
+        SMOOTH_WINDOW = 3
+        v_curv = np.array([
+            min(v_curv[(i + off) % n] for off in range(-SMOOTH_WINDOW, SMOOTH_WINDOW + 1))
+            for i in range(n)
+        ])
+
         dist = np.array([np.linalg.norm(xy[(i + 1) % n] - xy[i]) for i in range(n)])
 
         v = v_curv.copy()
