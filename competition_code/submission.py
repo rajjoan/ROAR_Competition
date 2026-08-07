@@ -20,19 +20,6 @@ def filter_waypoints(location : np.ndarray, current_idx: int, waypoints : List[r
             return i % len(waypoints)
     return current_idx
 
-def menger_radius(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, max_radius: float = 10000.0) -> float:
-    """Radius of the circle through 3 (x, y) points. Large/flat -> max_radius (effectively straight)."""
-    a = np.linalg.norm(p2 - p1)
-    b = np.linalg.norm(p3 - p2)
-    c = np.linalg.norm(p3 - p1)
-    if a < 1e-3 or b < 1e-3 or c < 1e-3:
-        return max_radius
-    s = (a + b + c) / 2
-    area_sq = s * (s - a) * (s - b) * (s - c)
-    if area_sq < 1e-3:
-        return max_radius
-    return (a * b * c) / (4 * np.sqrt(area_sq))
-
 class RoarCompetitionSolution:
     def __init__(
         self,
@@ -55,14 +42,24 @@ class RoarCompetitionSolution:
         self.collision_sensor = collision_sensor
 
     async def initialize(self) -> None:
+        # TODO: You can do some initial computation here if you want to.
+        # For example, you can compute the path to the first waypoint.
+        print("initialize() started", flush=True)
+
+        # Receive location, rotation and velocity data
         vehicle_location = self.location_sensor.get_last_gym_observation()
+        vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
+        vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
+
         self.current_waypoint_idx = 10
         self.current_waypoint_idx = filter_waypoints(
-            vehicle_location, self.current_waypoint_idx, self.maneuverable_waypoints
+            vehicle_location,
+            self.current_waypoint_idx,
+            self.maneuverable_waypoints
         )
 
-        # Smooth the raw waypoints (same triangle filter as the main-branch prototype),
-        # used both as the steering target path and as the curvature source below.
+        # Smoothed path (triangle filter), used both as the steering target line and
+        # as the curvature source for the velocity profile below.
         n = len(self.maneuverable_waypoints)
         self.path = [
             0.2 * self.maneuverable_waypoints[(i - 1) % n].location
@@ -70,74 +67,58 @@ class RoarCompetitionSolution:
             + 0.2 * self.maneuverable_waypoints[(i + 1) % n].location
             for i in range(n)
         ]
+        xy = [p[:2] for p in self.path]
 
-        self.velocity_profile = self._build_velocity_profile(self.path)
-        self.last_speed = 0.0
-        self.stuck_ticks = 0
-
-    def _build_velocity_profile(self, path: List[np.ndarray]) -> np.ndarray:
-        """
-        Precompute a target speed (m/s) for every waypoint, once, offline:
-          1. curvature-limited speed at each point (v = sqrt(mu*g*r))
-          2. backward pass: cap speed so there's always room to brake for what's ahead
-        No forward/acceleration cap is applied deliberately -- the reference solutions
-        never modeled one either (they just floor the throttle whenever under target),
-        and guessing a conservative accel limit is exactly the mistake the previous
-        team's "physics-based speed profile" attempt made (see writeup: it was too
-        conservative because the assumed model didn't match the sim). Better to leave
-        acceleration to the runtime controller, which can't be more wrong than a guess.
-        """
-        n = len(path)
-        xy = [p[:2] for p in path]
-
-        # MU: kept flat/global rather than per-section. Per-point curvature already
-        # gives much finer-grained corner detection than the reference solutions' 10
-        # hand-drawn section boundaries, so section-specific mu shouldn't be needed to
-        # get comparable safety margin. 2.75 is the reference solutions' own proven
-        # "never spins out anywhere on this track" default -- NOT re-derived here, just
-        # reused as a safe starting point. Untested with this exact controller though.
+        # Precompute a target speed (m/s) for every waypoint, once, offline:
+        #   1. curvature-limited speed at each point (v = sqrt(mu*g*r)), via a
+        #      3-point circle fit (Menger radius)
+        #   2. a sliding-window MIN filter so one noisy curvature reading can't
+        #      spike the target speed upward in the middle of a real corner
+        #   3. a backward pass so braking for any corner starts as early as it
+        #      actually needs to, not just within a fixed lookahead window
+        # MU=2.75 is reused from the reference solutions' own proven "doesn't spin
+        # out anywhere on this track" default. A_BRAKE=14.0 m/s^2 is back-derived
+        # from the reference ThrottleController's braking formula (a=170..200 in
+        # its km/h-based equation, /12.96 to convert to m/s^2). Both are still only
+        # carried over from a different controller, not measured against this one.
         MU = 2.75
         G = 9.81
-        V_MIN, V_MAX = 15.0, 85.0  # m/s; 85 m/s ~= 306 km/h, matching the reference solutions' proven ceiling
+        V_MIN, V_MAX = 15.0, 85.0
+        A_BRAKE = 14.0
+        SMOOTH_WINDOW = 3
 
-        # A_BRAKE: derived, not guessed. The reference ThrottleController's braking-distance
-        # formula (get_throttle_and_brake_2/speed_for_turn_new) is
-        #   max_speed_kmh = sqrt(target_speed_kmh**2 + 2*a*dist)      [a = 170..200]
-        # which is the same kinematic equation as below but with speed in km/h instead of
-        # m/s. Converting: v_ms = v_kmh/3.6, so a_ms2 = a_kmh_form / 3.6**2 = a / 12.96.
-        # a=170..200 -> ~13.1..15.4 m/s^2. This is still just carried over from a
-        # different controller on the same track, not measured directly against this one.
-        A_BRAKE = 14.0  # m/s^2
+        def radius(p1, p2, p3, max_radius=10000.0):
+            a = np.linalg.norm(p2 - p1)
+            b = np.linalg.norm(p3 - p2)
+            c = np.linalg.norm(p3 - p1)
+            if a < 1e-3 or b < 1e-3 or c < 1e-3:
+                return max_radius
+            s = (a + b + c) / 2
+            area_sq = s * (s - a) * (s - b) * (s - c)
+            if area_sq < 1e-3:
+                return max_radius
+            return (a * b * c) / (4 * np.sqrt(area_sq))
 
         v_curv = np.array([
-            np.clip(np.sqrt(MU * G * menger_radius(xy[(i - 2) % n], xy[i], xy[(i + 2) % n])), V_MIN, V_MAX)
+            np.clip(np.sqrt(MU * G * radius(xy[(i - 2) % n], xy[i], xy[(i + 2) % n])), V_MIN, V_MAX)
             for i in range(n)
         ])
-
-        # Sliding-window MIN filter, confirmed necessary by an actual in-sim crash:
-        # the debug log showed tgt_v spike from 26.6 -> 30.5 m/s in a single waypoint
-        # step while delta_heading was still growing (i.e. still mid-corner), and the
-        # resulting full-throttle command is what caused that crash. A single noisy
-        # curvature reading at one point had nothing capping it. Using min (not mean)
-        # means a bad reading can only be suppressed by tighter real neighbors, never
-        # averaged into something falsely faster.
-        SMOOTH_WINDOW = 3
         v_curv = np.array([
             min(v_curv[(i + off) % n] for off in range(-SMOOTH_WINDOW, SMOOTH_WINDOW + 1))
             for i in range(n)
         ])
-
         dist = np.array([np.linalg.norm(xy[(i + 1) % n] - xy[i]) for i in range(n)])
 
         v = v_curv.copy()
-        # Two passes around the closed loop so the braking cap propagates correctly
-        # through the wraparound (last waypoint -> first waypoint).
         for _ in range(2):
             for i in range(n - 1, -1, -1):
                 nxt = (i + 1) % n
                 v[i] = min(v[i], np.sqrt(v[nxt] ** 2 + 2 * A_BRAKE * dist[i]))
+        self.velocity_profile = v
 
-        return v
+        self.last_speed = 0.0
+        self.stuck_ticks = 0
+        print("initialize() finished", flush=True)
 
     async def step(
         self
@@ -147,21 +128,24 @@ class RoarCompetitionSolution:
         Note: You should not call receive_observation() on any sensor here, instead use get_last_observation() to get the last received observation.
         You can do whatever you want here, including apply_action() to the vehicle.
         """
+        # TODO: Implement your solution here.
+
+        # Receive location, rotation and velocity data
         vehicle_location = self.location_sensor.get_last_gym_observation()
         vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
         vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
         speed = np.linalg.norm(vehicle_velocity)
 
+        # Find the waypoint closest to the vehicle
         self.current_waypoint_idx = filter_waypoints(
-            vehicle_location, self.current_waypoint_idx, self.maneuverable_waypoints
+            vehicle_location,
+            self.current_waypoint_idx,
+            self.maneuverable_waypoints
         )
         n = len(self.maneuverable_waypoints)
 
-        # Dynamic lookahead. Cap raised from the main-branch prototype's 20 to 35
-        # waypoints, matching the reference solutions' own proven max lookahead count
-        # at top speed -- 20 was tuned against a 50 m/s ceiling, this profile now
-        # allows up to 85 m/s, and too-short a lookahead at high speed is a known
-        # cause of steering oscillation.
+        # Dynamic lookahead (3 to 35 waypoints, scales with speed), then pure
+        # pursuit steering toward that lookahead point on the smoothed path.
         lookahead_distance = int(np.clip(3 + 0.5 * speed, 3, 35))
         target_point = self.path[(self.current_waypoint_idx + lookahead_distance) % n]
 
@@ -169,22 +153,11 @@ class RoarCompetitionSolution:
         heading_to_target = np.arctan2(vector_to_target[1], vector_to_target[0])
         delta_heading = normalize_rad(heading_to_target - vehicle_rotation[2])
 
-        # Pure pursuit steering, replacing the plain proportional heading controller.
-        # This is the actual fix for the wall crashes: MU=2.75 in the velocity profile
-        # was carried over from the reference solutions' pure-pursuit controller, which
-        # naturally cuts toward a wider, gentler arc through a corner than the track's
-        # literal curvature. The old proportional controller tracked the path much more
-        # literally (tighter effective radius, same nominal corner), so v=sqrt(mu*g*r)
-        # was systematically optimistic for it -- the car was being asked to go faster
-        # than it could actually turn. Pure pursuit reunites the controller with the
-        # assumption the speed profile was built on.
         lookahead_m = max(np.linalg.norm(vector_to_target), 1e-3)
         steer_control = -1.5 * np.arctan2(2.0 * 4.7 * np.sin(delta_heading) / lookahead_m, 1.0)
         steer_control = np.clip(steer_control, -1.0, 1.0)
 
-        # Speed target: a direct lookup into the precomputed profile. Replaces the
-        # single-point heading-angle threshold table with per-point curvature +
-        # braking-distance planning that already accounts for the whole lap ahead.
+        # Speed target: a direct lookup into the precomputed profile.
         target_velocity = self.velocity_profile[self.current_waypoint_idx]
 
         speed_error = target_velocity - speed
@@ -194,12 +167,9 @@ class RoarCompetitionSolution:
         Kp, Kd = 0.8, 0.02
         throttle_control = np.clip(Kp * speed_error - Kd * speed_accel, -1.0, 1.0)
 
-        # Stuck detection: confirmed necessary by an actual in-sim crash log where the
-        # car's reported position was identical across 4+ consecutive ticks while
-        # throttle ramped to 1.0 -- it was wedged against a wall, grinding into it with
-        # nothing to recognize that commanding more throttle wasn't producing any speed.
-        # If throttle is meaningfully open but speed isn't rising for several ticks in a
-        # row, override to full brake instead of continuing to push into whatever it hit.
+        # Stuck detection: if throttle is meaningfully open but speed isn't rising
+        # for several ticks in a row, override to full brake instead of continuing
+        # to push into whatever it's wedged against.
         if throttle_control > 0.5 and speed_accel <= 0.05:
             self.stuck_ticks += 1
         else:
@@ -216,13 +186,12 @@ class RoarCompetitionSolution:
             "target_gear": 0,
         }
 
-        # TEMP DEBUG: remove once the wall-crash cause is confirmed. Prints one line
-        # per tick so we can see the actual numbers at the moment of a crash instead
-        # of guessing from symptoms.
+        # TEMP DEBUG: remove once the current issue is confirmed resolved.
         print(
             f"wp={self.current_waypoint_idx:4d} v={speed:5.1f} tgt_v={target_velocity:5.1f} "
             f"dh={delta_heading:+.3f} lh_m={lookahead_m:5.1f} steer={steer_control:+.3f} "
-            f"thr={control['throttle']:.2f} brk={control['brake']:.2f}"
+            f"thr={control['throttle']:.2f} brk={control['brake']:.2f}",
+            flush=True
         )
 
         await self.vehicle.apply_action(control)
