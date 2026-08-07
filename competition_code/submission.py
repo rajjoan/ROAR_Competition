@@ -118,6 +118,7 @@ class RoarCompetitionSolution:
 
         self.last_speed = 0.0
         self.stuck_ticks = 0
+        self.stuck_override_ticks = 0
         print("initialize() finished", flush=True)
 
     async def step(
@@ -168,14 +169,38 @@ class RoarCompetitionSolution:
         throttle_control = np.clip(Kp * speed_error - Kd * speed_accel, -1.0, 1.0)
 
         # Stuck detection: if throttle is meaningfully open but speed isn't rising
-        # for several ticks in a row, override to full brake instead of continuing
-        # to push into whatever it's wedged against.
-        if throttle_control > 0.5 and speed_accel <= 0.05:
+        # for several ticks in a row WHILE ALREADY MOVING, override to full brake
+        # instead of continuing to push into whatever it's wedged against.
+        #
+        # BUG FIXED HERE: the previous version didn't gate on speed > 0, so it also
+        # triggered on any normal standing start / post-collision respawn (both have
+        # speed~0 with high commanded throttle for the first few ticks, indistinguishable
+        # from actually being stuck). Once triggered it forced throttle=-1.0 forever,
+        # which guarantees speed stays 0 forever, which keeps the trigger condition
+        # true forever -- a permanent deadlock. Confirmed via debug log: car frozen at
+        # v=0.0, thr=0.00, brk=1.00, unchanged for 100+ ticks after a respawn.
+        # Fixed with: (1) only counts as "stuck" above a real moving speed, ruling out
+        # standing starts/respawns entirely; (2) the override now auto-releases after
+        # a fixed number of ticks regardless, so even an unforeseen edge case can't
+        # lock forever.
+        STUCK_MIN_SPEED = 5.0
+        STUCK_TRIGGER_TICKS = 5
+        STUCK_OVERRIDE_TICKS = 15
+
+        if throttle_control > 0.5 and speed_accel <= 0.05 and speed > STUCK_MIN_SPEED:
             self.stuck_ticks += 1
         else:
             self.stuck_ticks = 0
-        if self.stuck_ticks > 5:
-            throttle_control = -1.0
+
+        if self.stuck_ticks > STUCK_TRIGGER_TICKS:
+            self.stuck_override_ticks += 1
+            if self.stuck_override_ticks <= STUCK_OVERRIDE_TICKS:
+                throttle_control = -1.0
+            else:
+                self.stuck_ticks = 0
+                self.stuck_override_ticks = 0
+        else:
+            self.stuck_override_ticks = 0
 
         control = {
             "throttle": max(throttle_control, 0.0),
