@@ -58,9 +58,30 @@ class RoarCompetitionSolution:
             self.maneuverable_waypoints
         )
 
+        n = len(self.maneuverable_waypoints)
+
+        # TEMP DEBUG: one-time dump of the RAW (unsmoothed) waypoint data around the
+        # corner that both main_higher_speed_cap and combined_solution have crashed
+        # at repeatedly, at wildly different speeds and with two different control
+        # architectures. That pattern looks like a data problem, not a tuning
+        # problem -- checking for a jump, kink, or lane_width anomaly in the raw
+        # points themselves before assuming it's controllable via speed/steering.
+        print("--- raw waypoint dump, wp 455-520 ---", flush=True)
+        prev_loc = None
+        for i in range(455, 521):
+            wp = self.maneuverable_waypoints[i % n]
+            loc = wp.location
+            step_dist = np.linalg.norm(loc[:2] - prev_loc[:2]) if prev_loc is not None else 0.0
+            prev_loc = loc
+            print(
+                f"  wp={i:4d} x={loc[0]:9.3f} y={loc[1]:9.3f} z={loc[2]:7.3f} "
+                f"lane_width={wp.lane_width:5.2f} step_dist={step_dist:5.2f}",
+                flush=True
+            )
+        print("--- end raw waypoint dump ---", flush=True)
+
         # Smoothed path (triangle filter), used both as the steering target line and
         # as the curvature source for the velocity profile below.
-        n = len(self.maneuverable_waypoints)
         self.path = [
             0.2 * self.maneuverable_waypoints[(i - 1) % n].location
             + 0.6 * self.maneuverable_waypoints[i].location
