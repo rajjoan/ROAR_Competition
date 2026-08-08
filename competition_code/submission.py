@@ -168,6 +168,21 @@ class RoarCompetitionSolution:
         elif prediction_turn > 0.35: #0.25
             target_velocity = min(target_velocity, 42)#30
 
+        # BUG FIX (confirmed via 2 crash logs at the same corner, waypoint ~500):
+        # the cap ladder above only looks at prediction_turn (the far-ahead point).
+        # Once that clears -- i.e. the corner's exit becomes visible ahead -- every
+        # cap lifts, even if turn_amount (the CURRENT heading error) is still large,
+        # meaning the car hasn't actually finished the corner it's in yet. Both
+        # crashes showed pred_turn drop below 0.35 while turn_amount was still
+        # 0.33-0.41, target_velocity jumped to 53-55, thr went to 1.0, and the car
+        # lost the corner ~2 ticks later. This mirrors the existing "Aggressive
+        # Throttle Recovery" block below, which already requires BOTH turn_amount
+        # and prediction_turn to be small before boosting speed -- the main cap
+        # ladder just never got the same protection. Reusing the already-proven 42
+        # cap rather than inventing a new number.
+        if turn_amount > 0.35:
+            target_velocity = min(target_velocity, 42)
+
         target_velocity = np.clip(target_velocity,15,70)
 
         # Proportional controller to steer the vehicle towards the target waypoint
