@@ -269,6 +269,23 @@ class RoarCompetitionSolution:
         # force to shed the larger speed deficits the raised cap now creates. Full
         # range matches what every other controller in this repo already uses.
         throttle_control = np.clip(throttle_control, -1.0, 1.0)
+
+        # FRICTION-BUDGET FIX (scoped to this corner only): real tires share a
+        # limited grip budget between braking and cornering (the "friction
+        # circle/ellipse"). The last crash log showed brk=1.00 held constant right
+        # through the sharpest part of the turn (turn~0.27-0.28) while heading
+        # converged correctly (turn_amount -> 0) but xtrack still grew to ~8m --
+        # consistent with full braking leaving no grip left over to actually
+        # execute the turn, not with a bad steering angle. Capping how much brake
+        # can be demanded as turn_amount rises, so some grip stays reserved for
+        # cornering instead of all of it going to deceleration exactly when the
+        # corner needs lateral grip the most. Floor of 0.5 so it never gives up
+        # braking entirely, even at the sharpest point measured so far (~0.28).
+        if 440 <= self.current_waypoint_idx <= 510:
+            max_brake_here = 1.0 - min(turn_amount * 1.2, 0.5)
+            if throttle_control < -max_brake_here:
+                throttle_control = -max_brake_here
+
         control = {
                 "throttle": max(throttle_control, 0.0),
                 "steer": steer_control,
