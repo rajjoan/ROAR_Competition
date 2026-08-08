@@ -224,5 +224,15 @@ class RoarCompetitionSolution:
                 "target_gear": 0,
             }
 
+        # TEMP DEBUG: remove once the waypoint-500 corner is diagnosed. main has no
+        # existing telemetry, and the last crash log there (position only) couldn't
+        # tell us whether this is overspeed-into-the-corner or too-late-braking.
+        print(
+            f"wp={self.current_waypoint_idx:4d} v={vehicle_velocity_norm:5.1f} "
+            f"tgt_v={target_velocity:5.1f} turn={turn_amount:.3f} pred_turn={prediction_turn:.3f} "
+            f"thr={control['throttle']:.2f} brk={control['brake']:.2f}",
+            flush=True
+        )
+
         await self.vehicle.apply_action(control)
         return control
