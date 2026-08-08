@@ -224,7 +224,14 @@ class RoarCompetitionSolution:
 # PD Controller
         #throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
         throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
-        throttle_control = np.clip(throttle_control, -0.45, 1.0)
+        # Braking authority was hard-capped at 45% (-0.45), which never mattered at
+        # main's original 50 m/s ceiling (speed errors were always small enough for
+        # 45% brake to be sufficient). Confirmed via debug log: brk pinned at exactly
+        # 0.45 for 10+ consecutive ticks while v stayed 15-24 m/s above tgt_v the
+        # whole way through the corner and never caught up -- not enough braking
+        # force to shed the larger speed deficits the raised cap now creates. Full
+        # range matches what every other controller in this repo already uses.
+        throttle_control = np.clip(throttle_control, -1.0, 1.0)
         control = {
                 "throttle": max(throttle_control, 0.0),
                 "steer": steer_control,
