@@ -286,10 +286,19 @@ class RoarCompetitionSolution:
         # TEMP DEBUG: remove once the waypoint-500 corner is diagnosed. main has no
         # existing telemetry, and the last crash log there (position only) couldn't
         # tell us whether this is overspeed-into-the-corner or too-late-braking.
+        # cross_track: distance from the car's actual position to the path at the
+        # current waypoint index. Speed and heading have both looked correct through
+        # every crash at this corner so far -- this measures the one thing we
+        # haven't: whether the car has drifted laterally off the intended line
+        # despite pointing and moving correctly, which neither turn_amount nor
+        # tgt_v/v could ever show.
+        cross_track = np.linalg.norm(
+            (vehicle_location - self.optimized_waypoints[self.current_waypoint_idx].location)[:2]
+        )
         print(
             f"wp={self.current_waypoint_idx:4d} v={vehicle_velocity_norm:5.1f} "
             f"tgt_v={target_velocity:5.1f} turn={turn_amount:.3f} pred_turn={prediction_turn:.3f} "
-            f"thr={control['throttle']:.2f} brk={control['brake']:.2f}",
+            f"xtrack={cross_track:5.2f} thr={control['throttle']:.2f} brk={control['brake']:.2f}",
             flush=True
         )
 
