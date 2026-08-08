@@ -55,6 +55,12 @@ class RoarCompetitionSolution:
             self.maneuverable_waypoints
         )
 
+        # Stuck detection state -- see step() for the reasoning. Set explicitly here
+        # rather than the getattr-on-first-use pattern used elsewhere in this file,
+        # so there's no first-tick ambiguity.
+        self.stuck_ticks = 0
+        self.stuck_override_ticks = 0
+
         # Build a smoothed racing line
         self.optimized_waypoints=[]
         n=len(self.maneuverable_waypoints)
@@ -285,6 +291,38 @@ class RoarCompetitionSolution:
             max_brake_here = 1.0 - min(turn_amount * 1.2, 0.5)
             if throttle_control < -max_brake_here:
                 throttle_control = -max_brake_here
+
+        # STUCK DETECTION: the last crash log showed a different failure signature
+        # than the corner-tuning bugs we'd been chasing -- turn~2.8 rad (~160deg
+        # heading error), v stuck at 2.5-3.7 m/s, waypoint index not advancing,
+        # thr=1.00 held the whole time with no progress. That's not a mid-corner
+        # slide, it's the same stuck-against-something deadlock already found and
+        # fixed on combined_solution earlier this session: something made contact,
+        # and with nothing checking whether more throttle is actually producing
+        # speed, it just kept flooring it into whatever it hit while the heading
+        # error compounded. Reapplying the same proven fix here: if throttle is
+        # meaningfully open but speed isn't rising for several ticks in a row WHILE
+        # ALREADY MOVING (gated on speed, so this can't fire during a normal
+        # standing start or post-collision respawn), override to full brake for a
+        # capped number of ticks, then release regardless so it can't deadlock.
+        STUCK_MIN_SPEED = 5.0
+        STUCK_TRIGGER_TICKS = 5
+        STUCK_OVERRIDE_TICKS = 15
+
+        if throttle_control > 0.5 and speed_acceleration <= 0.05 and vehicle_velocity_norm > STUCK_MIN_SPEED:
+            self.stuck_ticks += 1
+        else:
+            self.stuck_ticks = 0
+
+        if self.stuck_ticks > STUCK_TRIGGER_TICKS:
+            self.stuck_override_ticks += 1
+            if self.stuck_override_ticks <= STUCK_OVERRIDE_TICKS:
+                throttle_control = -1.0
+            else:
+                self.stuck_ticks = 0
+                self.stuck_override_ticks = 0
+        else:
+            self.stuck_override_ticks = 0
 
         control = {
                 "throttle": max(throttle_control, 0.0),
