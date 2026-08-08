@@ -193,10 +193,27 @@ class RoarCompetitionSolution:
 
         target_velocity = np.clip(target_velocity,15,70)
 
-        # Proportional controller to steer the vehicle towards the target waypoint
-        steer_control = (
-            -8.0 / np.sqrt(vehicle_velocity_norm) * delta_heading / np.pi
-        ) if vehicle_velocity_norm > 1e-2 else -np.sign(delta_heading)
+        # STEERING FIX: swapped the proportional heading controller for real pure
+        # pursuit. Reasoning from the last crash log: v converged nicely to tgt_v
+        # (50.5 -> 40.0, closing on 38) and turn_amount shrank steadily to near 0
+        # (car successfully straightening out) -- by every number tracked so far
+        # this should have been the cleanest pass through this corner yet, and
+        # instead it was the hardest crash of all 6 attempts (intensity 12087, over
+        # 2x any previous one). That combination points away from speed/braking
+        # (already converging correctly) and toward steering authority: the old
+        # formula's gain is -8/sqrt(speed), which deliberately WEAKENS as speed
+        # rises. During the fast part of this corner (v in the 50s) steering
+        # correction is at its weakest, plausibly letting the car run wide toward
+        # the outside wall exactly when it needed the most correction -- heading
+        # can look fine again once speed (and therefore gain) drops back down, even
+        # though the car has already drifted off line by then.
+        # Pure pursuit doesn't have this property: its steering angle comes from the
+        # actual lookahead geometry (atan2(2L*sin(alpha)/distance, 1)), not an
+        # empirical speed-dependent fudge factor. Same formula/constants already
+        # validated on combined_solution this session, sign-checked against this
+        # file's own delta_heading convention (heading_to_waypoint - vehicle_rotation).
+        lookahead_m = max(np.linalg.norm(vector_to_waypoint), 1e-3)
+        steer_control = -1.5 * np.arctan2(2.0 * 4.7 * np.sin(delta_heading) / lookahead_m, 1.0)
         steer_control = np.clip(steer_control, -1.0, 1.0)
 
         # Proportional controller to control the vehicle's speed towards 40 m/s
