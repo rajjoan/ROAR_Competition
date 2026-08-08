@@ -178,18 +178,19 @@ class RoarCompetitionSolution:
         elif prediction_turn > 0.35: #0.25
             target_velocity = min(target_velocity, 42)#30
 
-        # CORNER-SPECIFIC OVERRIDE: waypoint ~500 crashed 4 times in a row. The 4th
-        # attempt (480-510 @ 38 m/s) proved the cap value and formula were both
-        # already correct -- debug log showed brk=1.00 (genuine max braking, not
-        # capped) the entire zone, tgt_v flat at 38 with no cliff, and speed still
-        # only dropped 55.4 -> 45.2 before impact. That's not a tuning problem, it's
-        # a distance problem: working the kinematics backward from the observed
-        # deceleration rate (~20 m/s^2 from this same log), reaching 38 from ~55
-        # needs about 40m (~18 waypoints) more braking runway than 480-510 provided.
-        # Moved the zone's start earlier (480 -> 460) to give that runway, kept the
-        # same proven-safe 38 m/s target and the same end point.
-        if 460 <= self.current_waypoint_idx <= 510:
-            target_velocity = min(target_velocity, 38)
+        # CORNER-SPECIFIC OVERRIDE: cross-track telemetry (added last commit) proved
+        # this isn't a speed-target or braking-distance problem anymore -- at 38 m/s,
+        # with correct braking and correctly converging heading (turn_amount -> 0),
+        # the car still drifted up to ~8m off the path (xtrack), accelerating right
+        # near impact, while heading error was SHRINKING at the same time. That's
+        # understeer: tires sliding despite being pointed correctly, meaning 38 m/s
+        # is still faster than this corner's actual grip limit, not a tuning
+        # artifact. Dropping to 28 (a real jump, not another 2-4 m/s nudge, given
+        # the "just barely not enough" pattern across 42 -> 38) and widening the
+        # zone's start further (460 -> 440) since a lower target needs more braking
+        # distance too.
+        if 440 <= self.current_waypoint_idx <= 510:
+            target_velocity = min(target_velocity, 28)
 
         target_velocity = np.clip(target_velocity,15,70)
 
@@ -228,17 +229,11 @@ class RoarCompetitionSolution:
         if turn_amount < 0.15 and prediction_turn < 0.1:
             target_velocity += recovery_speed
 
-        # BUG FIX: confirmed via 2 crash logs -- this recovery bonus doesn't know
-        # about the waypoint 460-510 corner override above, and fires right as the
-        # car exits that corner (turn_amount and prediction_turn both drop low
-        # there by design). It added +8 on top of the already-correct 38 cap,
-        # producing tgt_v=46 while the car was still only at 42 m/s -- full
-        # throttle commanded exactly where it needed to still be settling out of
-        # the corner. Re-applying the corner cap here, as the actual last word on
-        # speed in this zone, rather than trying to make the recovery block aware
-        # of every override that might exist above it.
-        if 460 <= self.current_waypoint_idx <= 510:
-            target_velocity = min(target_velocity, 38)
+        # Re-applying the corner cap here (see the matching override above for the
+        # full reasoning) so the recovery bonus can never undo it, whatever the cap
+        # value currently is.
+        if 440 <= self.current_waypoint_idx <= 510:
+            target_velocity = min(target_velocity, 28)
 
         target_velocity = np.clip(target_velocity, 15, 70)
 
