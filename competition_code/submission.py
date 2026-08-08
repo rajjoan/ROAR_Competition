@@ -228,6 +228,18 @@ class RoarCompetitionSolution:
         if turn_amount < 0.15 and prediction_turn < 0.1:
             target_velocity += recovery_speed
 
+        # BUG FIX: confirmed via 2 crash logs -- this recovery bonus doesn't know
+        # about the waypoint 460-510 corner override above, and fires right as the
+        # car exits that corner (turn_amount and prediction_turn both drop low
+        # there by design). It added +8 on top of the already-correct 38 cap,
+        # producing tgt_v=46 while the car was still only at 42 m/s -- full
+        # throttle commanded exactly where it needed to still be settling out of
+        # the corner. Re-applying the corner cap here, as the actual last word on
+        # speed in this zone, rather than trying to make the recovery block aware
+        # of every override that might exist above it.
+        if 460 <= self.current_waypoint_idx <= 510:
+            target_velocity = min(target_velocity, 38)
+
         target_velocity = np.clip(target_velocity, 15, 70)
 
 # ----------------------------------------------------------
