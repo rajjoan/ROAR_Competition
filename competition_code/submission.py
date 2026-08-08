@@ -151,12 +151,22 @@ class RoarCompetitionSolution:
 # ----------------------------------------------------------
 
         turn_amount = abs(delta_heading)
-        # SPEED CAP EXPERIMENT: base raised 48 -> 62 (so straight-line ceiling with
-        # recovery becomes ~70 instead of ~50). Deliberately NOT touching the
-        # prediction_turn cornering caps below (24/28/33/42) -- those are the proven,
-        # working part; this only raises how fast it's allowed to go where the
-        # predictive-braking checks don't already override it (mainly straights).
-        target_velocity = 62 - (21 * turn_amount)
+        # SPEED VS TURN_AMOUNT SLOPE FIX (v2): the single "if turn_amount > 0.35:
+        # cap 42" patch from the previous commit still had a cliff -- both new crash
+        # logs showed turn_amount at 0.349, just under the cutoff, releasing straight
+        # to the uncapped formula (54.7) instead of easing down. A threshold just
+        # moves the cliff, it doesn't remove it.
+        #
+        # Real fix: steepen the formula's own slope so it falls off continuously and
+        # lands on the same already-proven safe values the prediction_turn ladder
+        # below uses, with no separate cliff needed. Solved 62 - K*0.35 = 42 for K
+        # (the exact turn_amount/target_velocity pair from the crash logs) -> K=57.
+        # Checked against the other ladder anchors: turn=0.5 -> 33.5 (ladder: 33),
+        # turn=0.7 -> 22.1 (ladder: 28, now more conservative, safe direction),
+        # turn=0.9 -> clipped to the 15 floor (ladder: 24, also more conservative).
+        # Slightly over-cautious at the sharpest end, which is the right side to
+        # err on for now rather than risk a third crash at the same corner.
+        target_velocity = 62 - (57 * turn_amount)
 
 		# Predictive Braking
         if prediction_turn > 0.90: #0.75
@@ -167,21 +177,6 @@ class RoarCompetitionSolution:
             target_velocity = min(target_velocity, 33)#23
         elif prediction_turn > 0.35: #0.25
             target_velocity = min(target_velocity, 42)#30
-
-        # BUG FIX (confirmed via 2 crash logs at the same corner, waypoint ~500):
-        # the cap ladder above only looks at prediction_turn (the far-ahead point).
-        # Once that clears -- i.e. the corner's exit becomes visible ahead -- every
-        # cap lifts, even if turn_amount (the CURRENT heading error) is still large,
-        # meaning the car hasn't actually finished the corner it's in yet. Both
-        # crashes showed pred_turn drop below 0.35 while turn_amount was still
-        # 0.33-0.41, target_velocity jumped to 53-55, thr went to 1.0, and the car
-        # lost the corner ~2 ticks later. This mirrors the existing "Aggressive
-        # Throttle Recovery" block below, which already requires BOTH turn_amount
-        # and prediction_turn to be small before boosting speed -- the main cap
-        # ladder just never got the same protection. Reusing the already-proven 42
-        # cap rather than inventing a new number.
-        if turn_amount > 0.35:
-            target_velocity = min(target_velocity, 42)
 
         target_velocity = np.clip(target_velocity,15,70)
 
