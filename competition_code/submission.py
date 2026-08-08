@@ -151,9 +151,14 @@ class RoarCompetitionSolution:
 # ----------------------------------------------------------
 
         turn_amount = abs(delta_heading)
-        target_velocity = 48 - (21 * turn_amount)   
+        # SPEED CAP EXPERIMENT: base raised 48 -> 62 (so straight-line ceiling with
+        # recovery becomes ~70 instead of ~50). Deliberately NOT touching the
+        # prediction_turn cornering caps below (24/28/33/42) -- those are the proven,
+        # working part; this only raises how fast it's allowed to go where the
+        # predictive-braking checks don't already override it (mainly straights).
+        target_velocity = 62 - (21 * turn_amount)
 
-		# Predictive Braking 
+		# Predictive Braking
         if prediction_turn > 0.90: #0.75
             target_velocity = min(target_velocity, 24) #19
         elif prediction_turn > 0.70:
@@ -162,8 +167,8 @@ class RoarCompetitionSolution:
             target_velocity = min(target_velocity, 33)#23
         elif prediction_turn > 0.35: #0.25
             target_velocity = min(target_velocity, 42)#30
- 
-        target_velocity = np.clip(target_velocity,15,50)
+
+        target_velocity = np.clip(target_velocity,15,70)
 
         # Proportional controller to steer the vehicle towards the target waypoint
         steer_control = (
@@ -182,8 +187,8 @@ class RoarCompetitionSolution:
 
         if turn_amount < 0.15 and prediction_turn < 0.1:
             target_velocity += recovery_speed
- 
-        target_velocity = np.clip(target_velocity, 15, 50)
+
+        target_velocity = np.clip(target_velocity, 15, 70)
 
 # ----------------------------------------------------------
 # PD Speed Controller
