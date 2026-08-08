@@ -178,6 +178,23 @@ class RoarCompetitionSolution:
         elif prediction_turn > 0.35: #0.25
             target_velocity = min(target_velocity, 42)#30
 
+        # CORNER-SPECIFIC OVERRIDE: waypoint ~500 crashed 3 times in a row despite
+        # 3 separate, confirmed-correct fixes to the general formula (the cliff, the
+        # slope, and the 45% braking-authority cap) -- each fix demonstrably worked
+        # (verified via debug log each time) and it still crashed here, meaning the
+        # ceiling isn't in those constants anymore, it's specific to this corner.
+        # Rather than keep tuning the global formula against this one spot (which
+        # risks either another crash here or over-conservatism everywhere else),
+        # give it its own separate, explicit cap. Range covers where turn_amount was
+        # observed building (waypoint ~491) through where the crashes happened
+        # (500-502), with margin on both sides for reaction time.
+        # 38 m/s is deliberately conservative: below the already-proven-safe 42
+        # ladder value used elsewhere for similar turn_amount, and below the
+        # original 50 m/s ceiling this corner was never tested past. After 3 failed
+        # attempts here, prioritizing certainty over squeezing out a few more m/s.
+        if 480 <= self.current_waypoint_idx <= 510:
+            target_velocity = min(target_velocity, 38)
+
         target_velocity = np.clip(target_velocity,15,70)
 
         # Proportional controller to steer the vehicle towards the target waypoint
