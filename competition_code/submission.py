@@ -161,8 +161,22 @@ class RoarCompetitionSolution:
                 return max_radius
             return (a * b * c) / (4 * np.sqrt(area_sq))
 
+        # CURVATURE SAMPLING WIDENED (2 -> 6 waypoints each side): confirmed via
+        # telemetry that tgt_v was pinned at ~70 m/s almost everywhere on the
+        # track (vs. the 85 m/s ceiling), only occasionally reaching 85 at a few
+        # accidentally-clean stretches. Working backward from v=70, that's an
+        # implied radius of ~182m -- nowhere near a real straight. At a tight
+        # ~4.4m sampling baseline (+-2 waypoints), small positional noise in the
+        # raw waypoint data gets amplified into an apparent gentle curve almost
+        # everywhere, capping speed on genuinely straight sections. Widening the
+        # baseline averages that noise out. Still narrow enough that it shouldn't
+        # smooth over the real corner at wp~495-509 (that corner's curvature
+        # builds over 40-80 waypoints, well beyond this window) -- but that's the
+        # one thing to specifically re-check after this change, since if it did
+        # get smoothed out too, tgt_v there would read dangerously high.
+        CURVE_SAMPLE = 6
         v_curv = np.array([
-            np.clip(np.sqrt(MU * G * radius(xy[(i - 2) % n], xy[i], xy[(i + 2) % n])), V_MIN, V_MAX)
+            np.clip(np.sqrt(MU * G * radius(xy[(i - CURVE_SAMPLE) % n], xy[i], xy[(i + CURVE_SAMPLE) % n])), V_MIN, V_MAX)
             for i in range(n)
         ])
         v_curv = np.array([
