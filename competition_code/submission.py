@@ -88,6 +88,51 @@ class RoarCompetitionSolution:
             + 0.2 * self.maneuverable_waypoints[(i + 1) % n].location
             for i in range(n)
         ]
+
+        # APEX-CUT for the persistent problem corner: shift the path laterally
+        # toward what should be the inside of this turn, tapering from 0 at the
+        # zone boundaries up to a peak at the tightest point (~505, based on local
+        # heading steepening sharply between wp500-520 in the raw waypoint dump),
+        # back to 0 at the far end. This raises the effective turning radius at the
+        # same nominal track location, letting v=sqrt(mu*g*r) hold at a higher
+        # speed without needing more grip -- same principle as the reference
+        # solution's hand-drawn "ideal line" for its hardest corners, computed here
+        # instead of hand-authored.
+        #
+        # DIRECTION IS UNVERIFIED. CARLA uses a left-handed coordinate system
+        # (inherited from Unreal Engine), so the usual "increasing heading angle
+        # = left turn" assumption isn't guaranteed to hold here. Kept the shift to
+        # a conservative 1.5m (well under the confirmed 12m lane width)
+        # specifically so a wrong-direction guess is recoverable, not dangerous.
+        # If this makes things worse, flip APEX_DIRECTION to -1.0 -- the signed
+        # xtrack_signed telemetry added in step() will show clearly which way it
+        # actually needs to go, instead of guessing blind a second time.
+        APEX_START, APEX_PEAK, APEX_END = 450, 505, 525
+        APEX_MAX_SHIFT = 1.5
+        APEX_DIRECTION = 1.0
+
+        self.apex_left_perp = {}  # saved per-index for the signed xtrack calc in step()
+        for i in range(APEX_START, APEX_END + 1):
+            idx = i % n
+            if i <= APEX_PEAK:
+                t = (i - APEX_START) / max(APEX_PEAK - APEX_START, 1)
+            else:
+                t = (APEX_END - i) / max(APEX_END - APEX_PEAK, 1)
+            shift_amount = APEX_MAX_SHIFT * max(0.0, min(1.0, t)) * APEX_DIRECTION
+
+            prev_loc = self.maneuverable_waypoints[(idx - 1) % n].location[:2]
+            next_loc = self.maneuverable_waypoints[(idx + 1) % n].location[:2]
+            tangent = next_loc - prev_loc
+            tangent_norm = np.linalg.norm(tangent)
+            if tangent_norm < 1e-3:
+                continue
+            tangent = tangent / tangent_norm
+            left_perp = np.array([-tangent[1], tangent[0]])
+            self.apex_left_perp[idx] = left_perp
+
+            self.path[idx] = self.path[idx].copy()
+            self.path[idx][:2] = self.path[idx][:2] + shift_amount * left_perp
+
         xy = [p[:2] for p in self.path]
 
         # Precompute a target speed (m/s) for every waypoint, once, offline:
@@ -232,11 +277,24 @@ class RoarCompetitionSolution:
             "target_gear": 0,
         }
 
+        # SIGNED cross-track, relative to the ORIGINAL raw waypoint (not the
+        # apex-shifted path), along the same left_perp direction used for the
+        # apex-cut shift. Positive = car is on the side we shifted the path
+        # toward; negative = car is on the opposite side. If it crashes while this
+        # is trending strongly negative, that's direct evidence APEX_DIRECTION
+        # needs to flip to -1.0 -- no more guessing which way the wall actually is.
+        left_perp = self.apex_left_perp.get(self.current_waypoint_idx)
+        if left_perp is not None:
+            raw_wp_loc = self.maneuverable_waypoints[self.current_waypoint_idx].location[:2]
+            xtrack_signed = float(np.dot(vehicle_location[:2] - raw_wp_loc, left_perp))
+        else:
+            xtrack_signed = float("nan")
+
         # TEMP DEBUG: remove once the current issue is confirmed resolved.
         print(
             f"wp={self.current_waypoint_idx:4d} v={speed:5.1f} tgt_v={target_velocity:5.1f} "
             f"dh={delta_heading:+.3f} lh_m={lookahead_m:5.1f} steer={steer_control:+.3f} "
-            f"thr={control['throttle']:.2f} brk={control['brake']:.2f}",
+            f"xtrack_signed={xtrack_signed:6.2f} thr={control['throttle']:.2f} brk={control['brake']:.2f}",
             flush=True
         )
 
