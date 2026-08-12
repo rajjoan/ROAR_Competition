@@ -89,33 +89,22 @@ class RoarCompetitionSolution:
             for i in range(n)
         ]
 
-        # APEX-CUT for the persistent problem corner: shift the path laterally
-        # toward what should be the inside of this turn, tapering from 0 at the
-        # zone boundaries up to a peak at the tightest point (~505, based on local
-        # heading steepening sharply between wp500-520 in the raw waypoint dump),
-        # back to 0 at the far end. This raises the effective turning radius at the
-        # same nominal track location, letting v=sqrt(mu*g*r) hold at a higher
-        # speed without needing more grip -- same principle as the reference
-        # solution's hand-drawn "ideal line" for its hardest corners, computed here
-        # instead of hand-authored.
-        #
-        # DIRECTION IS UNVERIFIED. CARLA uses a left-handed coordinate system
-        # (inherited from Unreal Engine), so the usual "increasing heading angle
-        # = left turn" assumption isn't guaranteed to hold here. Kept the shift to
-        # a conservative 1.5m (well under the confirmed 12m lane width)
-        # specifically so a wrong-direction guess is recoverable, not dangerous.
-        # If this makes things worse, flip APEX_DIRECTION to -1.0 -- the signed
-        # xtrack_signed telemetry added in step() will show clearly which way it
-        # actually needs to go, instead of guessing blind a second time.
-        #
-        # ZONE SHRUNK (450 -> 485): reported symptom was the car turning way too
-        # early. Steering targets a point up to 35 waypoints ahead, so starting the
-        # taper at 450 meant the car could start reacting to the shift from around
-        # wp415 (~77m before the zone even begins) -- not wrong waypoint data, just
-        # the lookahead previewing the shift from too far back. Moving the start
-        # closer to the peak leaves less runway for that early preview.
+        # APEX-CUT: REVERTED (shift disabled, APEX_MAX_SHIFT=0.0). Confirmed
+        # counterproductive, not just unverified: debug data showed dh/steer
+        # already growing smoothly from ~wp451 onward, well before this zone
+        # starts (485) and using lookahead targets that are still on the
+        # UNSHIFTED path at that point -- meaning the car was already cutting
+        # toward the inside on its own, naturally, from pure pursuit's lookahead
+        # on this long sweeping corner. Adding more inward shift on top of an
+        # already-cutting car compounded the effect and caused it to cross the
+        # actual inside edge into a wall before the track geometry had opened up
+        # for the turn -- confirmed as the direct cause of a crash, not just
+        # theoretical risk. Left the code structure and xtrack_signed telemetry in
+        # place (harmless at 0 shift) in case a much smaller, carefully-tuned
+        # shift is worth revisiting later, but not assuming that without new
+        # evidence -- the immediate priority is not making this corner worse.
         APEX_START, APEX_PEAK, APEX_END = 485, 505, 525
-        APEX_MAX_SHIFT = 1.5
+        APEX_MAX_SHIFT = 0.0
         APEX_DIRECTION = 1.0
 
         self.apex_left_perp = {}  # saved per-index for the signed xtrack calc in step()
