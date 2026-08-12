@@ -207,9 +207,21 @@ class RoarCompetitionSolution:
         )
         n = len(self.maneuverable_waypoints)
 
-        # Dynamic lookahead (3 to 35 waypoints, scales with speed), then pure
-        # pursuit steering toward that lookahead point on the smoothed path.
-        lookahead_distance = int(np.clip(3 + 0.5 * speed, 3, 35))
+        # Dynamic lookahead, then pure pursuit steering toward that lookahead
+        # point on the smoothed path.
+        #
+        # SLOPE REDUCED (0.5 -> 0.3): reported symptom, confirmed across multiple
+        # corners, not just the one we'd been debugging -- the car cuts corners
+        # more aggressively than the track allows (touching/crossing the inside
+        # edge), turning in later than before (after reverting the extra
+        # apex-shift) but still not late enough. Aiming 27-35 waypoints ahead
+        # (at these speeds) on a path already smoothed toward corner interiors
+        # (the triangle filter) compounds into over-aggressive cutting on every
+        # corner, not just one. Pulling the lookahead target closer reduces how
+        # far ahead (and how far into a corner's interior) the aim point sits,
+        # everywhere at once, instead of patching each corner individually. Kept
+        # the 35 cap as a safety ceiling, though it rarely binds at this slope.
+        lookahead_distance = int(np.clip(3 + 0.3 * speed, 3, 35))
         target_point = self.path[(self.current_waypoint_idx + lookahead_distance) % n]
 
         vector_to_target = (target_point - vehicle_location)[:2]
