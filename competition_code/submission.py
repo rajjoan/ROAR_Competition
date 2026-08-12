@@ -107,7 +107,14 @@ class RoarCompetitionSolution:
         # If this makes things worse, flip APEX_DIRECTION to -1.0 -- the signed
         # xtrack_signed telemetry added in step() will show clearly which way it
         # actually needs to go, instead of guessing blind a second time.
-        APEX_START, APEX_PEAK, APEX_END = 450, 505, 525
+        #
+        # ZONE SHRUNK (450 -> 485): reported symptom was the car turning way too
+        # early. Steering targets a point up to 35 waypoints ahead, so starting the
+        # taper at 450 meant the car could start reacting to the shift from around
+        # wp415 (~77m before the zone even begins) -- not wrong waypoint data, just
+        # the lookahead previewing the shift from too far back. Moving the start
+        # closer to the peak leaves less runway for that early preview.
+        APEX_START, APEX_PEAK, APEX_END = 485, 505, 525
         APEX_MAX_SHIFT = 1.5
         APEX_DIRECTION = 1.0
 
