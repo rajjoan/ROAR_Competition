@@ -43,7 +43,6 @@ class RoarCompetitionSolution:
         self.frame = 0
     async def initialize(self) -> None:
         # TODO: You can do some initial computation here if you want to.
-        # For example, you can compute the path to the first waypoint.        # Receive location, rotation and velocity data 
         vehicle_location = self.location_sensor.get_last_gym_observation()
         vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
         vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
