@@ -138,12 +138,19 @@ class RoarCompetitionSolution:
         #      spike the target speed upward in the middle of a real corner
         #   3. a backward pass so braking for any corner starts as early as it
         #      actually needs to, not just within a fixed lookahead window
-        # MU=2.75 is reused from the reference solutions' own proven "doesn't spin
-        # out anywhere on this track" default. A_BRAKE=14.0 m/s^2 is back-derived
-        # from the reference ThrottleController's braking formula (a=170..200 in
-        # its km/h-based equation, /12.96 to convert to m/s^2). Both are still only
-        # carried over from a different controller, not measured against this one.
-        MU = 2.75
+        # MU raised 2.75 -> 3.0 (first incremental step on the now-stable 458s
+        # baseline, no crashes). 2.75 was the reference solutions' conservative
+        # default; their own per-section tuned values went up to 3.4 on this same
+        # track, so there's confirmed headroom above 2.75 somewhere on this
+        # course. +0.25 is a deliberately small first step (~4.4% more corner
+        # speed via v=sqrt(mu*g*r)) rather than jumping toward 3.4 directly,
+        # given this is a flat/global value (not per-section like the
+        # reference's), so a bad guess here would affect every corner on the
+        # track at once, not just one. A_BRAKE=14.0 m/s^2 is back-derived from
+        # the reference ThrottleController's braking formula (a=170..200 in its
+        # km/h-based equation, /12.96 to convert to m/s^2) -- unchanged, still
+        # only carried over from a different controller, not measured here.
+        MU = 3.0
         G = 9.81
         V_MIN, V_MAX = 15.0, 85.0
         A_BRAKE = 14.0
