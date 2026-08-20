@@ -138,20 +138,27 @@ class RoarCompetitionSolution:
         #      spike the target speed upward in the middle of a real corner
         #   3. a backward pass so braking for any corner starts as early as it
         #      actually needs to, not just within a fixed lookahead window
-        # MU raised 3.0 -> 3.2 (second incremental step). The first step
-        # (2.75 -> 3.0) bought 72s cleanly (458s -> 386s, matching main's
-        # original baseline exactly) with zero crashes -- confirms 2.75 was
-        # genuinely conservative and there's more headroom. Reference solutions'
-        # per-section tuned values went up to 3.4 on this same track, so still
-        # under that ceiling. Kept the step small (+0.2, ~3.3% more corner speed)
-        # rather than jumping straight to 3.4, same reasoning as before: this is
-        # a flat/global value, so a bad guess affects every corner at once, not
-        # just one. A_BRAKE=14.0 m/s^2 unchanged, still only carried over from
-        # the reference ThrottleController's braking formula, not measured here.
+        # MU: 3.0 -> 3.2 bought essentially nothing (386s -> 387s), a sharp cliff
+        # after the first step's 72s gain -- too abrupt to be ordinary diminishing
+        # returns on the same lever, meaning something else became the binding
+        # constraint. Leaving MU at 3.2 (no harm, no crash) and moving to that
+        # other lever instead of pushing MU further blind.
+        #
+        # A_BRAKE raised 14.0 -> 18.0: this value was always an assumption, back-
+        # derived from the reference solution's braking formula, never actually
+        # measured against this vehicle. We do have a real measurement, from
+        # earlier this session's main_higher_speed_cap crash log: speed dropped
+        # 55.4 -> 45.2 m/s in ~0.5s while braking hard, ~20 m/s^2 -- notably
+        # higher than the 14 assumed here. If the real car can brake harder than
+        # the profile assumes, the backward pass starts slowing down earlier than
+        # necessary before every corner on the track, costing straight-line time
+        # everywhere regardless of how high MU is -- which would explain the MU
+        # cliff exactly. Stepped to 18 (not the full ~20) as a first move toward
+        # the measured value rather than jumping straight to it.
         MU = 3.2
         G = 9.81
         V_MIN, V_MAX = 15.0, 85.0
-        A_BRAKE = 14.0
+        A_BRAKE = 18.0
         SMOOTH_WINDOW = 3
 
         def radius(p1, p2, p3, max_radius=10000.0):
