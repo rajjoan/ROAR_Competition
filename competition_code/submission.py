@@ -102,8 +102,19 @@ class RoarCompetitionSolution:
         k_v = 0.5
         # Calculate lookahead based on current speed
         lookahead_distance = int(base_lookahead + k_v * vehicle_velocity_norm)
-        # Keep it between 3 and 20 waypoints
-        lookahead_distance = np.clip(lookahead_distance, 3, 20)
+        # Cap raised 20 -> 30. This formula wants 3+0.5*speed, which already
+        # saturated the old cap of 20 at just 34 m/s -- well under even the
+        # original 50 m/s ceiling, meaning the car has effectively been looking
+        # exactly as far ahead regardless of speed for a while now. Now that the
+        # ceiling is 62, that gap is worse: same fixed distance, covered faster,
+        # means less real reaction time before a corner. This is the exact
+        # failure mode already found (and fixed, by raising 20 -> 35) on
+        # main_higher_speed_cap -- applying the same fix here proactively,
+        # before it causes a crash rather than after, since main is now
+        # carrying the same latent risk at its new, higher ceiling. Slightly
+        # more conservative than that branch's 35 since main doesn't have the
+        # same per-corner safety nets that branch ended up needing.
+        lookahead_distance = np.clip(lookahead_distance, 3, 30)
         # Select the target waypoint
         waypoint_to_follow = self.optimized_waypoints[
             (self.current_waypoint_idx + lookahead_distance)
