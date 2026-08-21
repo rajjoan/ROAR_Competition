@@ -7,7 +7,7 @@ from typing import List, Tuple, Dict, Optional
 import roar_py_interface
 import numpy as np
 
-def normalize_rad(rad : float):
+def normalize_rad(rad : float):  
     return (rad + np.pi) % (2 * np.pi) - np.pi
 
 def filter_waypoints(location : np.ndarray, current_idx: int, waypoints : List[roar_py_interface.RoarPyWaypoint]) -> int:
@@ -21,7 +21,7 @@ def filter_waypoints(location : np.ndarray, current_idx: int, waypoints : List[r
     return current_idx
 
 class RoarCompetitionSolution:
-    def __init__(
+    def __init__( 
         self,
         maneuverable_waypoints: List[roar_py_interface.RoarPyWaypoint],
         vehicle : roar_py_interface.RoarPyActor,
@@ -40,13 +40,9 @@ class RoarCompetitionSolution:
         self.rpy_sensor = rpy_sensor
         self.occupancy_map_sensor = occupancy_map_sensor
         self.collision_sensor = collision_sensor
-
+        self.frame = 0
     async def initialize(self) -> None:
         # TODO: You can do some initial computation here if you want to.
-        # For example, you can compute the path to the first waypoint.
-        print("initialize() started", flush=True)
-
-        # Receive location, rotation and velocity data
         vehicle_location = self.location_sensor.get_last_gym_observation()
         vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
         vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
@@ -58,156 +54,21 @@ class RoarCompetitionSolution:
             self.maneuverable_waypoints
         )
 
-        n = len(self.maneuverable_waypoints)
-
-        # TEMP DEBUG: one-time dump of the RAW (unsmoothed) waypoint data around the
-        # corner that both main_higher_speed_cap and combined_solution have crashed
-        # at repeatedly, at wildly different speeds and with two different control
-        # architectures. That pattern looks like a data problem, not a tuning
-        # problem -- checking for a jump, kink, or lane_width anomaly in the raw
-        # points themselves before assuming it's controllable via speed/steering.
-        print("--- raw waypoint dump, wp 455-520 ---", flush=True)
-        prev_loc = None
-        for i in range(455, 521):
-            wp = self.maneuverable_waypoints[i % n]
-            loc = wp.location
-            step_dist = np.linalg.norm(loc[:2] - prev_loc[:2]) if prev_loc is not None else 0.0
-            prev_loc = loc
-            print(
-                f"  wp={i:4d} x={loc[0]:9.3f} y={loc[1]:9.3f} z={loc[2]:7.3f} "
-                f"lane_width={wp.lane_width:5.2f} step_dist={step_dist:5.2f}",
-                flush=True
+        # Build a smoothed racing line
+        self.optimized_waypoints=[]
+        n=len(self.maneuverable_waypoints)
+        for i in range(n):
+            p=self.maneuverable_waypoints[(i-1)%n]
+            c=self.maneuverable_waypoints[i]
+            nx=self.maneuverable_waypoints[(i+1)%n]
+            wp=roar_py_interface.RoarPyWaypoint(
+                location=0.2*p.location+0.6*c.location+0.2*nx.location,
+                roll_pitch_yaw=c.roll_pitch_yaw,
+                lane_width=c.lane_width
             )
-        print("--- end raw waypoint dump ---", flush=True)
+            self.optimized_waypoints.append(wp)
 
-        # Smoothed path (triangle filter), used both as the steering target line and
-        # as the curvature source for the velocity profile below.
-        self.path = [
-            0.2 * self.maneuverable_waypoints[(i - 1) % n].location
-            + 0.6 * self.maneuverable_waypoints[i].location
-            + 0.2 * self.maneuverable_waypoints[(i + 1) % n].location
-            for i in range(n)
-        ]
 
-        # APEX-CUT: REVERTED (shift disabled, APEX_MAX_SHIFT=0.0). Confirmed
-        # counterproductive, not just unverified: debug data showed dh/steer
-        # already growing smoothly from ~wp451 onward, well before this zone
-        # starts (485) and using lookahead targets that are still on the
-        # UNSHIFTED path at that point -- meaning the car was already cutting
-        # toward the inside on its own, naturally, from pure pursuit's lookahead
-        # on this long sweeping corner. Adding more inward shift on top of an
-        # already-cutting car compounded the effect and caused it to cross the
-        # actual inside edge into a wall before the track geometry had opened up
-        # for the turn -- confirmed as the direct cause of a crash, not just
-        # theoretical risk. Left the code structure and xtrack_signed telemetry in
-        # place (harmless at 0 shift) in case a much smaller, carefully-tuned
-        # shift is worth revisiting later, but not assuming that without new
-        # evidence -- the immediate priority is not making this corner worse.
-        APEX_START, APEX_PEAK, APEX_END = 485, 505, 525
-        APEX_MAX_SHIFT = 0.0
-        APEX_DIRECTION = 1.0
-
-        self.apex_left_perp = {}  # saved per-index for the signed xtrack calc in step()
-        for i in range(APEX_START, APEX_END + 1):
-            idx = i % n
-            if i <= APEX_PEAK:
-                t = (i - APEX_START) / max(APEX_PEAK - APEX_START, 1)
-            else:
-                t = (APEX_END - i) / max(APEX_END - APEX_PEAK, 1)
-            shift_amount = APEX_MAX_SHIFT * max(0.0, min(1.0, t)) * APEX_DIRECTION
-
-            prev_loc = self.maneuverable_waypoints[(idx - 1) % n].location[:2]
-            next_loc = self.maneuverable_waypoints[(idx + 1) % n].location[:2]
-            tangent = next_loc - prev_loc
-            tangent_norm = np.linalg.norm(tangent)
-            if tangent_norm < 1e-3:
-                continue
-            tangent = tangent / tangent_norm
-            left_perp = np.array([-tangent[1], tangent[0]])
-            self.apex_left_perp[idx] = left_perp
-
-            self.path[idx] = self.path[idx].copy()
-            self.path[idx][:2] = self.path[idx][:2] + shift_amount * left_perp
-
-        xy = [p[:2] for p in self.path]
-
-        # Precompute a target speed (m/s) for every waypoint, once, offline:
-        #   1. curvature-limited speed at each point (v = sqrt(mu*g*r)), via a
-        #      3-point circle fit (Menger radius)
-        #   2. a sliding-window MIN filter so one noisy curvature reading can't
-        #      spike the target speed upward in the middle of a real corner
-        #   3. a backward pass so braking for any corner starts as early as it
-        #      actually needs to, not just within a fixed lookahead window
-        # MU: 3.0 -> 3.2 bought essentially nothing (386s -> 387s), a sharp cliff
-        # after the first step's 72s gain -- too abrupt to be ordinary diminishing
-        # returns on the same lever, meaning something else became the binding
-        # constraint. Leaving MU at 3.2 (no harm, no crash) and moving to that
-        # other lever instead of pushing MU further blind.
-        #
-        # A_BRAKE raised 14.0 -> 18.0: this value was always an assumption, back-
-        # derived from the reference solution's braking formula, never actually
-        # measured against this vehicle. We do have a real measurement, from
-        # earlier this session's main_higher_speed_cap crash log: speed dropped
-        # 55.4 -> 45.2 m/s in ~0.5s while braking hard, ~20 m/s^2 -- notably
-        # higher than the 14 assumed here. If the real car can brake harder than
-        # the profile assumes, the backward pass starts slowing down earlier than
-        # necessary before every corner on the track, costing straight-line time
-        # everywhere regardless of how high MU is -- which would explain the MU
-        # cliff exactly. Stepped to 18 (not the full ~20) as a first move toward
-        # the measured value rather than jumping straight to it.
-        MU = 3.2
-        G = 9.81
-        V_MIN, V_MAX = 15.0, 85.0
-        A_BRAKE = 18.0
-        SMOOTH_WINDOW = 3
-
-        def radius(p1, p2, p3, max_radius=10000.0):
-            a = np.linalg.norm(p2 - p1)
-            b = np.linalg.norm(p3 - p2)
-            c = np.linalg.norm(p3 - p1)
-            if a < 1e-3 or b < 1e-3 or c < 1e-3:
-                return max_radius
-            s = (a + b + c) / 2
-            area_sq = s * (s - a) * (s - b) * (s - c)
-            if area_sq < 1e-3:
-                return max_radius
-            return (a * b * c) / (4 * np.sqrt(area_sq))
-
-        # CURVATURE SAMPLING WIDENED (2 -> 6 waypoints each side): confirmed via
-        # telemetry that tgt_v was pinned at ~70 m/s almost everywhere on the
-        # track (vs. the 85 m/s ceiling), only occasionally reaching 85 at a few
-        # accidentally-clean stretches. Working backward from v=70, that's an
-        # implied radius of ~182m -- nowhere near a real straight. At a tight
-        # ~4.4m sampling baseline (+-2 waypoints), small positional noise in the
-        # raw waypoint data gets amplified into an apparent gentle curve almost
-        # everywhere, capping speed on genuinely straight sections. Widening the
-        # baseline averages that noise out. Still narrow enough that it shouldn't
-        # smooth over the real corner at wp~495-509 (that corner's curvature
-        # builds over 40-80 waypoints, well beyond this window) -- but that's the
-        # one thing to specifically re-check after this change, since if it did
-        # get smoothed out too, tgt_v there would read dangerously high.
-        CURVE_SAMPLE = 6
-        v_curv = np.array([
-            np.clip(np.sqrt(MU * G * radius(xy[(i - CURVE_SAMPLE) % n], xy[i], xy[(i + CURVE_SAMPLE) % n])), V_MIN, V_MAX)
-            for i in range(n)
-        ])
-        v_curv = np.array([
-            min(v_curv[(i + off) % n] for off in range(-SMOOTH_WINDOW, SMOOTH_WINDOW + 1))
-            for i in range(n)
-        ])
-        dist = np.array([np.linalg.norm(xy[(i + 1) % n] - xy[i]) for i in range(n)])
-
-        v = v_curv.copy()
-        for _ in range(2):
-            for i in range(n - 1, -1, -1):
-                nxt = (i + 1) % n
-                v[i] = min(v[i], np.sqrt(v[nxt] ** 2 + 2 * A_BRAKE * dist[i]))
-        self.velocity_profile = v
-
-        self.last_speed = 0.0
-        self.stuck_ticks = 0
-        self.stuck_override_ticks = 0
-        print("initialize() finished", flush=True)
 
     async def step(
         self
@@ -219,118 +80,143 @@ class RoarCompetitionSolution:
         """
         # TODO: Implement your solution here.
 
-        # Receive location, rotation and velocity data
+        # Receive location, rotation and velocity data 
         vehicle_location = self.location_sensor.get_last_gym_observation()
         vehicle_rotation = self.rpy_sensor.get_last_gym_observation()
         vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
-        speed = np.linalg.norm(vehicle_velocity)
-
+        vehicle_velocity_norm = np.linalg.norm(vehicle_velocity)
+        
         # Find the waypoint closest to the vehicle
         self.current_waypoint_idx = filter_waypoints(
             vehicle_location,
             self.current_waypoint_idx,
             self.maneuverable_waypoints
         )
-        n = len(self.maneuverable_waypoints)
+         # We use the 3rd waypoint ahead of the current waypoint as the target waypoint
+        ## ----------------------------------------------------------
+        # Dynamic Lookahead
+        # ----------------------------------------------------------
+        # Minimum number of waypoints to look ahead
+        base_lookahead = 3
+        # Controls how much the lookahead increases with speed
+        k_v = 0.5
+        # Calculate lookahead based on current speed
+        lookahead_distance = int(base_lookahead + k_v * vehicle_velocity_norm)
+        # Keep it between 3 and 20 waypoints
+        lookahead_distance = np.clip(lookahead_distance, 3, 20)
+        # Select the target waypoint
+        waypoint_to_follow = self.optimized_waypoints[
+            (self.current_waypoint_idx + lookahead_distance)
+            % len(self.maneuverable_waypoints)
+        ]
+        
 
-        # Dynamic lookahead, then pure pursuit steering toward that lookahead
-        # point on the smoothed path.
-        #
-        # SLOPE REDUCED (0.5 -> 0.3): reported symptom, confirmed across multiple
-        # corners, not just the one we'd been debugging -- the car cuts corners
-        # more aggressively than the track allows (touching/crossing the inside
-        # edge), turning in later than before (after reverting the extra
-        # apex-shift) but still not late enough. Aiming 27-35 waypoints ahead
-        # (at these speeds) on a path already smoothed toward corner interiors
-        # (the triangle filter) compounds into over-aggressive cutting on every
-        # corner, not just one. Pulling the lookahead target closer reduces how
-        # far ahead (and how far into a corner's interior) the aim point sits,
-        # everywhere at once, instead of patching each corner individually. Kept
-        # the 35 cap as a safety ceiling, though it rarely binds at this slope.
-        lookahead_distance = int(np.clip(3 + 0.3 * speed, 3, 35))
-        target_point = self.path[(self.current_waypoint_idx + lookahead_distance) % n]
+        # Calculate delta vector towards the target waypoint
+        vector_to_waypoint = (waypoint_to_follow.location - vehicle_location)[:2]
+        heading_to_waypoint = np.arctan2(vector_to_waypoint[1],vector_to_waypoint[0])
 
-        vector_to_target = (target_point - vehicle_location)[:2]
-        heading_to_target = np.arctan2(vector_to_target[1], vector_to_target[0])
-        delta_heading = normalize_rad(heading_to_target - vehicle_rotation[2])
+        # Calculate delta angle towards the target waypoint
+        delta_heading = normalize_rad(heading_to_waypoint - vehicle_rotation[2])
+		
+# ----------------------------------------------------------
+# Predictive Intelligent Braking
+# ----------------------------------------------------------
+        prediction_offset = 17
+        prediction_distance = lookahead_distance + prediction_offset
 
-        lookahead_m = max(np.linalg.norm(vector_to_target), 1e-3)
-        steer_control = -1.5 * np.arctan2(2.0 * 4.7 * np.sin(delta_heading) / lookahead_m, 1.0)
+        prediction_waypoint = self.maneuverable_waypoints[
+			(self.current_waypoint_idx + prediction_distance)
+			% len(self.maneuverable_waypoints)]
+			
+			
+        prediction_vector = (
+			prediction_waypoint.location - vehicle_location
+			)[:2]
+
+        prediction_heading = np.arctan2(
+		prediction_vector[1],
+		prediction_vector[0]
+		)
+
+        prediction_delta_heading = normalize_rad(
+		prediction_heading - vehicle_rotation[2]
+		)
+
+        prediction_turn = abs(prediction_delta_heading)
+
+
+# ----------------------------------------------------------
+# Adaptive Target Speed
+# ----------------------------------------------------------
+
+        turn_amount = abs(delta_heading)
+        target_velocity = 48 - (21 * turn_amount)   
+
+		# Predictive Braking 
+        if prediction_turn > 0.90: #0.75
+            target_velocity = min(target_velocity, 24) #19
+        elif prediction_turn > 0.70:
+            target_velocity = min(target_velocity, 28)#23
+        elif prediction_turn > 0.50:
+            target_velocity = min(target_velocity, 33)#23
+        elif prediction_turn > 0.35: #0.25
+            target_velocity = min(target_velocity, 42)#30
+ 
+        target_velocity = np.clip(target_velocity,15,50)
+
+        # Proportional controller to steer the vehicle towards the target waypoint
+        steer_control = (
+            -8.0 / np.sqrt(vehicle_velocity_norm) * delta_heading / np.pi
+        ) if vehicle_velocity_norm > 1e-2 else -np.sign(delta_heading)
         steer_control = np.clip(steer_control, -1.0, 1.0)
 
-        # Speed target: a direct lookup into the precomputed profile.
-        target_velocity = self.velocity_profile[self.current_waypoint_idx]
+        # Proportional controller to control the vehicle's speed towards 40 m/s
+        #throttle_control = 0.05 * (20 - vehicle_velocity_norm)  
 
-        speed_error = target_velocity - speed
-        speed_accel = speed - self.last_speed
-        self.last_speed = speed
+# ----------------------------------------------------------
+# Aggressive Throttle Recovery
+# ----------------------------------------------------------
 
-        Kp, Kd = 0.8, 0.02
-        throttle_control = np.clip(Kp * speed_error - Kd * speed_accel, -1.0, 1.0)
+        recovery_speed = 8
 
-        # Stuck detection: if throttle is meaningfully open but speed isn't rising
-        # for several ticks in a row WHILE ALREADY MOVING, override to full brake
-        # instead of continuing to push into whatever it's wedged against.
-        #
-        # BUG FIXED HERE: the previous version didn't gate on speed > 0, so it also
-        # triggered on any normal standing start / post-collision respawn (both have
-        # speed~0 with high commanded throttle for the first few ticks, indistinguishable
-        # from actually being stuck). Once triggered it forced throttle=-1.0 forever,
-        # which guarantees speed stays 0 forever, which keeps the trigger condition
-        # true forever -- a permanent deadlock. Confirmed via debug log: car frozen at
-        # v=0.0, thr=0.00, brk=1.00, unchanged for 100+ ticks after a respawn.
-        # Fixed with: (1) only counts as "stuck" above a real moving speed, ruling out
-        # standing starts/respawns entirely; (2) the override now auto-releases after
-        # a fixed number of ticks regardless, so even an unforeseen edge case can't
-        # lock forever.
-        STUCK_MIN_SPEED = 5.0
-        STUCK_TRIGGER_TICKS = 5
-        STUCK_OVERRIDE_TICKS = 15
+        if turn_amount < 0.15 and prediction_turn < 0.1:
+            target_velocity += recovery_speed
+ 
+        target_velocity = np.clip(target_velocity, 15, 50)
 
-        if throttle_control > 0.5 and speed_accel <= 0.05 and speed > STUCK_MIN_SPEED:
-            self.stuck_ticks += 1
-        else:
-            self.stuck_ticks = 0
+# ----------------------------------------------------------
+# PD Speed Controller
+# ----------------------------------------------------------
 
-        if self.stuck_ticks > STUCK_TRIGGER_TICKS:
-            self.stuck_override_ticks += 1
-            if self.stuck_override_ticks <= STUCK_OVERRIDE_TICKS:
-                throttle_control = -1.0
-            else:
-                self.stuck_ticks = 0
-                self.stuck_override_ticks = 0
-        else:
-            self.stuck_override_ticks = 0
+# Desired cruising speed
+#        target_velocity = 30.0   # 30 m/s ≈ 108 km/h
 
+# P Term: How far are we from the target speed?
+        speed_error = target_velocity - vehicle_velocity_norm
+
+# D Term: How much has the speed changed since the last frame?
+        last_speed = getattr(self, "last_speed", vehicle_velocity_norm)
+        speed_acceleration = vehicle_velocity_norm - last_speed
+
+# Save current speed for the next frame
+        self.last_speed = vehicle_velocity_norm 
+
+# Controller gains
+        Kp = 0.8
+        Kd = 0.02
+
+# PD Controller
+        #throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
+        throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
+        throttle_control = np.clip(throttle_control, -0.45, 1.0)
         control = {
-            "throttle": max(throttle_control, 0.0),
-            "steer": steer_control,
-            "brake": max(-throttle_control, 0.0),
-            "hand_brake": 0.0,
-            "reverse": 0,
-            "target_gear": 0,
-        }
-
-        # SIGNED cross-track, relative to the ORIGINAL raw waypoint (not the
-        # apex-shifted path), along the same left_perp direction used for the
-        # apex-cut shift. Positive = car is on the side we shifted the path
-        # toward; negative = car is on the opposite side. If it crashes while this
-        # is trending strongly negative, that's direct evidence APEX_DIRECTION
-        # needs to flip to -1.0 -- no more guessing which way the wall actually is.
-        left_perp = self.apex_left_perp.get(self.current_waypoint_idx)
-        if left_perp is not None:
-            raw_wp_loc = self.maneuverable_waypoints[self.current_waypoint_idx].location[:2]
-            xtrack_signed = float(np.dot(vehicle_location[:2] - raw_wp_loc, left_perp))
-        else:
-            xtrack_signed = float("nan")
-
-        # TEMP DEBUG: remove once the current issue is confirmed resolved.
-        print(
-            f"wp={self.current_waypoint_idx:4d} v={speed:5.1f} tgt_v={target_velocity:5.1f} "
-            f"dh={delta_heading:+.3f} lh_m={lookahead_m:5.1f} steer={steer_control:+.3f} "
-            f"xtrack_signed={xtrack_signed:6.2f} thr={control['throttle']:.2f} brk={control['brake']:.2f}",
-            flush=True
-        )
+                "throttle": max(throttle_control, 0.0),
+                "steer": steer_control,
+                "brake": max(-throttle_control, 0.0),
+                "hand_brake": 0.0,
+                "reverse": 0,
+                "target_gear": 0,
+            }
 
         await self.vehicle.apply_action(control)
         return control
