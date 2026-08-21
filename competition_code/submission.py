@@ -245,5 +245,19 @@ class RoarCompetitionSolution:
                 "target_gear": 0,
             }
 
+        # TEMP DEBUG: main had no telemetry at all, which is likely why the 50->62
+        # ceiling raise produced no measurable time change (387s vs 386s) without
+        # anyone being able to see why. Same lightweight print used on the other
+        # branches, to check whether the car is actually reaching the new ceiling
+        # anywhere or plateauing below it (e.g. if straights aren't long enough
+        # to matter, or if braking is starting at the same point regardless of
+        # ceiling since prediction_turn thresholds are unchanged).
+        print(
+            f"wp={self.current_waypoint_idx:4d} v={vehicle_velocity_norm:5.1f} "
+            f"tgt_v={target_velocity:5.1f} turn={turn_amount:.3f} pred_turn={prediction_turn:.3f} "
+            f"thr={control['throttle']:.2f} brk={control['brake']:.2f}",
+            flush=True
+        )
+
         await self.vehicle.apply_action(control)
         return control
