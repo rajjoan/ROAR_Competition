@@ -150,9 +150,27 @@ class RoarCompetitionSolution:
 # ----------------------------------------------------------
 
         turn_amount = abs(delta_heading)
-        target_velocity = 48 - (21 * turn_amount)   
+        # CEILING RAISED (48 -> 54 base, slope 21 -> 34), conservative version of
+        # what was learned pushing main_higher_speed_cap much further (to 62/70):
+        # that experiment proved the vehicle's real top speed is ~70 m/s
+        # regardless of target, so there's genuine headroom above the original
+        # 50 cap, but also proved that raising the base alone (without also
+        # steepening the turn_amount slope) creates a real bug -- the formula
+        # becomes too permissive at moderate turn_amount (e.g. ~53 at turn=0.35
+        # with the old slope+new base, vs. the already-proven-safe 42 from the
+        # prediction_turn ladder below), letting the car carry too much speed
+        # into a corner it hasn't finished turning through yet. That caused
+        # multiple real crashes there before being found and fixed.
+        # Solved 54 - K*0.35 = 42 (matching the ladder's own anchor) -> K=34,
+        # so this formula lands close to the same proven-safe ladder values at
+        # every turn_amount, not just at zero. Kept the ceiling itself well
+        # under the vehicle's ~70 m/s measured limit (54 base + 8 recovery = 62
+        # max) rather than pushing toward 70 directly, since main has no
+        # per-corner safety net the way the more heavily-patched experimental
+        # branch ended up needing.
+        target_velocity = 54 - (34 * turn_amount)
 
-		# Predictive Braking 
+		# Predictive Braking
         if prediction_turn > 0.90: #0.75
             target_velocity = min(target_velocity, 24) #19
         elif prediction_turn > 0.70:
@@ -161,8 +179,8 @@ class RoarCompetitionSolution:
             target_velocity = min(target_velocity, 33)#23
         elif prediction_turn > 0.35: #0.25
             target_velocity = min(target_velocity, 42)#30
- 
-        target_velocity = np.clip(target_velocity,15,50)
+
+        target_velocity = np.clip(target_velocity,15,62)
 
         # Proportional controller to steer the vehicle towards the target waypoint
         steer_control = (
@@ -181,8 +199,8 @@ class RoarCompetitionSolution:
 
         if turn_amount < 0.15 and prediction_turn < 0.1:
             target_velocity += recovery_speed
- 
-        target_velocity = np.clip(target_velocity, 15, 50)
+
+        target_velocity = np.clip(target_velocity, 15, 62)
 
 # ----------------------------------------------------------
 # PD Speed Controller
@@ -208,7 +226,16 @@ class RoarCompetitionSolution:
 # PD Controller
         #throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
         throttle_control = (Kp * speed_error) - (Kd * speed_acceleration)
-        throttle_control = np.clip(throttle_control, -0.45, 1.0)
+        # Braking authority raised from 45% to full (100%). Confirmed as a real
+        # bug on main_higher_speed_cap: at the original 50 m/s ceiling, speed
+        # errors were always small enough that 45% brake happened to be enough,
+        # so this never showed up -- but debug telemetry there showed brk
+        # pinned at exactly 0.45 for 10+ consecutive ticks while the car stayed
+        # 15-24 m/s above target the whole way through a corner, never catching
+        # up. Full brake authority is strictly protective (it can only help the
+        # car reach whatever target_velocity already says, never hurt), so
+        # applying it here even though this ceiling raise is much smaller.
+        throttle_control = np.clip(throttle_control, -1.0, 1.0)
         control = {
                 "throttle": max(throttle_control, 0.0),
                 "steer": steer_control,
